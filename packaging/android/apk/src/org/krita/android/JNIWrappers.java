@@ -18,5 +18,6 @@ class JNIWrappers {
     public static native void onSplashDialogDismissed();
     public static native void onScalingDialogShown();
     public static native void onScalingDialogDismissed();
+    public static native void stylusGestureKey(int keyCode, int action);
 }
 

@@ -42,6 +42,10 @@ import java.util.function.Consumer;
 public class MainActivity extends QtActivity {
 
     private static final String TAG = "krita.MainActivity";
+
+    // Non-standard key codes reported by vendor stylus hardware for its gestures.
+    private static final int STYLUS_GESTURE_KEY_FIRST = 194;
+    private static final int STYLUS_GESTURE_KEY_LAST = 197;
     private static boolean applicationLoaded = false;
     private static String applicationLoadingText = "";
     private boolean haveLibsLoaded = false;
@@ -180,6 +184,22 @@ public class MainActivity extends QtActivity {
         }
 
         return super.onKeyUp(keyCode, event);
+    }
+
+    /**
+     * Vendor stylus hardware (Xiaomi Focus Pen and similar) reports its gestures as
+     * non-standard key codes. Qt never turns these into key events, so capture them
+     * here and hand them to native, which maps them onto the remappable stylus
+     * actions. Rebind those actions in the stylus settings to change what they do.
+     */
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        final int keyCode = event.getKeyCode();
+        if (keyCode >= STYLUS_GESTURE_KEY_FIRST && keyCode <= STYLUS_GESTURE_KEY_LAST) {
+            JNIWrappers.stylusGestureKey(keyCode, event.getAction());
+            return true;
+        }
+        return super.dispatchKeyEvent(event);
     }
 
     @Override

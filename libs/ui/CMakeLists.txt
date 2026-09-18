@@ -519,6 +519,7 @@ elseif(ANDROID)
     list(APPEND kritaui_LIB_SRCS
         dialogs/KisDonationManagementDialog.cpp
         widgets/KisDonationManagementWidget.cpp
+        input/KisAndroidPenBridge.cpp
     )
     if(KRITA_QT_HAS_ANDROID_QPLATFORMSCREEN_DENSITY_ADJUSTMENT)
         list(APPEND kritaui_LIB_SRCS
