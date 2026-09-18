@@ -29,7 +29,11 @@ public:
         SwipeLeft,
         SwipeRight,
         CircleCW,
-        CircleCCW
+        CircleCCW,
+        StylusSqueeze,
+        StylusDoubleTap,
+        StylusSlideUp,
+        StylusSlideDown
     };
 
 

@@ -119,5 +119,57 @@
     <isCheckable>false</isCheckable>
     <statusTip></statusTip>
 </Action>
+
+<Action name="stylus_squeeze">
+    <icon></icon>
+    <text>Stylus Squeeze</text>
+    <whatsThis></whatsThis>
+    <toolTip></toolTip>
+    <iconText></iconText>
+    <activationFlags>10000</activationFlags>
+    <activationConditions>0</activationConditions>
+    <shortcut>F26</shortcut>
+    <isCheckable>false</isCheckable>
+    <statusTip></statusTip>
+</Action>
+
+<Action name="stylus_double_tap">
+    <icon></icon>
+    <text>Stylus Double Tap</text>
+    <whatsThis></whatsThis>
+    <toolTip></toolTip>
+    <iconText></iconText>
+    <activationFlags>10000</activationFlags>
+    <activationConditions>0</activationConditions>
+    <shortcut>F27</shortcut>
+    <isCheckable>false</isCheckable>
+    <statusTip></statusTip>
+</Action>
+
+<Action name="stylus_slide_up">
+    <icon></icon>
+    <text>Stylus Slide Up</text>
+    <whatsThis></whatsThis>
+    <toolTip></toolTip>
+    <iconText></iconText>
+    <activationFlags>10000</activationFlags>
+    <activationConditions>0</activationConditions>
+    <shortcut>F28</shortcut>
+    <isCheckable>false</isCheckable>
+    <statusTip></statusTip>
+</Action>
+
+<Action name="stylus_slide_down">
+    <icon></icon>
+    <text>Stylus Slide Down</text>
+    <whatsThis></whatsThis>
+    <toolTip></toolTip>
+    <iconText></iconText>
+    <activationFlags>10000</activationFlags>
+    <activationConditions>0</activationConditions>
+    <shortcut>F29</shortcut>
+    <isCheckable>false</isCheckable>
+    <statusTip></statusTip>
+</Action>
   </Actions>
 </ActionCollection>

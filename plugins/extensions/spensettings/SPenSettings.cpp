@@ -65,6 +65,20 @@ SPenSettings::SPenSettings(QObject* parent, const QVariantList&)
 
     KisAction* actionSPenCircleCCW = viewManager()->actionManager()->createAction("spen_circle_ccw");
     connect(actionSPenCircleCCW, &KisAction::triggered, this, [this]() { slotActivateAction(Action::CircleCCW); });
+
+    // Generic stylus gesture keys, delivered by the Android platform plugin as
+    // free function keys (see mapAndroidKey() in the Qt fork).
+    KisAction* actionStylusSqueeze = viewManager()->actionManager()->createAction("stylus_squeeze");
+    connect(actionStylusSqueeze, &KisAction::triggered, this, [this]() { slotActivateAction(Action::StylusSqueeze); });
+
+    KisAction* actionStylusDoubleTap = viewManager()->actionManager()->createAction("stylus_double_tap");
+    connect(actionStylusDoubleTap, &KisAction::triggered, this, [this]() { slotActivateAction(Action::StylusDoubleTap); });
+
+    KisAction* actionStylusSlideUp = viewManager()->actionManager()->createAction("stylus_slide_up");
+    connect(actionStylusSlideUp, &KisAction::triggered, this, [this]() { slotActivateAction(Action::StylusSlideUp); });
+
+    KisAction* actionStylusSlideDown = viewManager()->actionManager()->createAction("stylus_slide_down");
+    connect(actionStylusSlideDown, &KisAction::triggered, this, [this]() { slotActivateAction(Action::StylusSlideDown); });
 }
 
 SPenSettings::~SPenSettings()
@@ -100,6 +114,11 @@ void SPenSettings::slotLoadSettings()
     m_actionMap.insert(Action::SwipeRight, cfg.readEntry("actionGestureSwipeRight", QString()));
     m_actionMap.insert(Action::CircleCW, cfg.readEntry("actionGestureCircleCW", QString()));
     m_actionMap.insert(Action::CircleCCW, cfg.readEntry("actionGestureCircleCCW", QString()));
+
+    m_actionMap.insert(Action::StylusSqueeze, cfg.readEntry("actionStylusSqueeze", QStringLiteral("spen_show_popup_palette")));
+    m_actionMap.insert(Action::StylusDoubleTap, cfg.readEntry("actionStylusDoubleTap", QStringLiteral("erase_action")));
+    m_actionMap.insert(Action::StylusSlideUp, cfg.readEntry("actionStylusSlideUp", QStringLiteral("decrease_brush_size")));
+    m_actionMap.insert(Action::StylusSlideDown, cfg.readEntry("actionStylusSlideDown", QStringLiteral("increase_brush_size")));
 }
 
 void SPenSettings::slotTriggerPopupPalette()
