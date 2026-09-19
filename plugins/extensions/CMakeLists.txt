@@ -22,3 +22,7 @@ if (ANDROID)
     add_subdirectory( spensettings )
     add_subdirectory( pensettings )
 endif()
+
+# Not gated on ANDROID: the desktop build is the only place the session, geometry and
+# export logic can be verified, so pdfio has to keep building there.
+add_subdirectory( pdfio )

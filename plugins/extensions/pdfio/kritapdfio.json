@@ -1,0 +1,9 @@
+{
+    "Id": "PDF Notebook",
+    "Type": "Service",
+    "X-KDE-Library": "kritapdfio",
+    "X-KDE-ServiceTypes": [
+        "Krita/ViewPlugin"
+    ],
+    "X-Krita-Version": "28"
+}
