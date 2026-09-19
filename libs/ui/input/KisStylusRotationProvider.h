@@ -32,6 +32,14 @@ KRITAUI_EXPORT void clear();
 /** True when a recent vendor value is available. */
 KRITAUI_EXPORT bool isActive();
 
+/**
+ * True once a vendor value has ever been received, i.e. this device reports barrel
+ * rotation. Used to decide whether falling back to the event is safe at all: Qt reports
+ * the tilt orientation as rotation here, so falling back interleaves the correct angle
+ * with a tilt dependent one and makes the brush jitter.
+ */
+KRITAUI_EXPORT bool isSupported();
+
 /** Last vendor rotation in degrees. Only meaningful while isActive(). */
 KRITAUI_EXPORT qreal rotation();
 

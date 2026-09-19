@@ -63,6 +63,11 @@ bool isActive()
     return ageTimer().isValid() && ageTimer().elapsed() <= MAX_AGE_MS;
 }
 
+bool isSupported()
+{
+    return hasValue();
+}
+
 qreal rotation()
 {
     return storedRotation();
@@ -70,7 +75,10 @@ qreal rotation()
 
 qreal rotationFor(const KoPointerEvent *event)
 {
-    return isActive() ? rotation() : event->rotation();
+    // Once the device has reported barrel rotation, keep using it even between samples.
+    // Falling back to the event would mix in the tilt orientation that Qt reports, which
+    // is what made rotation follow the pen tilt and look unstable.
+    return isSupported() ? rotation() : event->rotation();
 }
 
 } // namespace KisStylusRotationProvider
