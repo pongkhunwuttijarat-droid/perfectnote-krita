@@ -5,6 +5,7 @@
  */
 
 #include "PdfIoPlugin.h"
+#include "PdfIoProbe.h"
 #include "PdfRendererSpike.h"
 
 #include <QDebug>
@@ -60,6 +61,8 @@ PdfIoPlugin::PdfIoPlugin(QObject *parent, const QVariantList &)
     PdfRendererSpike::run();
     /// Temporary: exercises the desktop backend on demand.
     probeDesktopBackendIfRequested();
+    /// Temporary: runs the whole open and save path from inside the application.
+    PdfIoProbe::runIfRequested();
 }
 
 PdfIoPlugin::~PdfIoPlugin()

@@ -687,7 +687,7 @@ void KisClipboard::setLayers(KisNodeList nodes, KisImageSP image, bool forceCopy
 bool KisClipboard::hasLayers() const
 {
     const QByteArray mimeType = QByteArrayLiteral("application/x-krita-node-internal-pointer");
-    return d->clipboard->mimeData()->hasFormat(mimeType);
+    return d->clipboard && d->clipboard->mimeData() && d->clipboard->mimeData()->hasFormat(mimeType);
 }
 
 bool KisClipboard::hasLayerStyles() const
@@ -696,7 +696,7 @@ bool KisClipboard::hasLayerStyles() const
     //       result of this function, because we allow pasting
     //       of the layer styles as 'text/plain'
 
-    return d->clipboard->mimeData()->hasFormat("application/x-krita-layer-style");
+    return d->clipboard && d->clipboard->mimeData() && d->clipboard->mimeData()->hasFormat("application/x-krita-layer-style");
 }
 
 const QMimeData *KisClipboard::layersMimeData() const
@@ -707,13 +707,13 @@ const QMimeData *KisClipboard::layersMimeData() const
 
 bool KisClipboard::hasUrls() const
 {
-    return d->clipboard->mimeData()->hasUrls();
+    return d->clipboard && d->clipboard->mimeData() && d->clipboard->mimeData()->hasUrls();
 }
 
 
 bool KisClipboard::hasImage() const
 {
-    return d->clipboard->mimeData()->hasImage();
+    return d->clipboard && d->clipboard->mimeData() && d->clipboard->mimeData()->hasImage();
 }
 
 QImage KisClipboard::getImageFromMimeData(const QMimeData *cbData) const

@@ -1,5 +1,6 @@
 set(kritapdfio_SOURCES
     PdfIoPlugin.cpp
+    PdfIoProbe.cpp
     PdfRendererSpike.cpp
     )
 
@@ -11,8 +12,21 @@ target_include_directories(kritapdfio PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 # has no Poppler at all and will reach android.graphics.pdf.PdfRenderer through QJniObject.
 # Everything above PdfRenderBackend is platform neutral, which is the point of the split.
 if (Poppler_Qt${QT_MAJOR_VERSION}_FOUND)
-    target_sources(kritapdfio PRIVATE backends/poppler/PopplerRenderBackend.cpp)
-    target_link_libraries(kritapdfio PRIVATE Poppler::Qt${QT_MAJOR_VERSION})
+    target_sources(kritapdfio PRIVATE
+        backends/poppler/PopplerRenderBackend.cpp
+        session/PdfSession.cpp
+        session/PdfSessionManifest.cpp
+        session/PdfProjectBuilder.cpp
+        session/PdfPageSaver.cpp)
+
+    # KraConverter, the only lever that skips mergedimage.png, lives in the KRA importer.
+    target_include_directories(kritapdfio PRIVATE ${CMAKE_SOURCE_DIR}/plugins/impex/libkra)
+
+    target_link_libraries(kritapdfio PRIVATE
+        Poppler::Qt${QT_MAJOR_VERSION}
+        kritaimage
+        kritalibkra)
+
     target_compile_definitions(kritapdfio PRIVATE PDFIO_HAVE_POPPLER)
 endif()
 
