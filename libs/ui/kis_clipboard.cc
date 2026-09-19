@@ -67,6 +67,13 @@ public:
 KisClipboard::KisClipboard()
     : d(new KisClipboardPrivate)
 {
+    // A platform without a clipboard -- headless runs, and some embedded builds -- has
+    // nothing to watch and nothing to report. Krita still has to start.
+    if (!d->clipboard) {
+        warnUI << "No platform clipboard available, clipboard integration is disabled";
+        return;
+    }
+
     // Check that we don't already have a clip ready
     clipboardDataChanged();
 
@@ -584,8 +591,8 @@ KisPaintDeviceSP KisClipboard::clipFromBoardContentsWithData(QImage qimage,
 void KisClipboard::clipboardDataChanged()
 {
     if (!d->pushedClipboard) {
-        const QMimeData *cbData = d->clipboard->mimeData();
-        d->hasClip = d->clipboard->mimeData()->hasImage()
+        const QMimeData *cbData = d->clipboard ? d->clipboard->mimeData() : nullptr;
+        d->hasClip = (cbData && cbData->hasImage())
                 || (cbData && cbData->hasFormat("application/x-krita-selection"));
     }
     d->pushedClipboard = false;
@@ -596,7 +603,7 @@ QImage KisClipboard::getImageWithFallback(const QMimeData *cbData, bool useClipb
 {
     QImage qimage = getImageFromMimeData(cbData);
 
-    if (qimage.isNull() && useClipboardFallback) {
+    if (qimage.isNull() && useClipboardFallback && d->clipboard) {
         qimage = d->clipboard->image();
     }
 
