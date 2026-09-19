@@ -22,6 +22,7 @@
 
 #if defined(PDFIO_HAVE_POPPLER)
 #include "backends/poppler/PopplerRenderBackend.h"
+#include "session/PdfPageSaver.h"
 #include "session/PdfProjectBuilder.h"
 #include "session/PdfSession.h"
 #endif
@@ -225,10 +226,45 @@ void PdfIoPlugin::slotOpenNotebook()
 
 void PdfIoPlugin::slotSavePage()
 {
-    /// Saving the page is the next step: it has to write an ink-only artifact, which means a
-    /// document holding just the Ink group, and it has to be driven from the event loop rather
-    /// than a nested one (a nested wait for sigSavingFinished wedged on the second save).
-    qWarning() << "pdfio: saving a page is not wired up yet";
+#if defined(PDFIO_HAVE_POPPLER)
+    KisDocument *document = viewManager() ? viewManager()->document() : nullptr;
+    if (!document || !document->image()) {
+        qWarning() << "pdfio: no page is open";
+        return;
+    }
+
+    const QString projectDir = document->property("pdfioProjectDir").toString();
+    const int pageIndex = document->property("pdfioPageIndex").toInt();
+    if (projectDir.isEmpty()) {
+        qWarning() << "pdfio: this document is not a note page";
+        return;
+    }
+
+    QString why;
+    KisDocument *inkOnly = PdfPageSaver::createInkOnlyDocument(document->image(), &why);
+    if (!inkOnly) {
+        qWarning() << "pdfio: cannot prepare the page:" << why;
+        return;
+    }
+
+    const QString path = QDir(projectDir).filePath(PdfSession::pageFileName(pageIndex));
+    QDir().mkpath(QFileInfo(path).absolutePath());
+
+    /// Krita saves in the background, so the copy has to outlive this call. It is deleted when
+    /// the save reports back, rather than by waiting here: a nested event loop around
+    /// sigSavingFinished wedged on the second save.
+    connect(inkOnly, &KisDocument::sigSavingFinished, this, [inkOnly, path](const QString &) {
+        say(QStringLiteral("saved %1 (%2 bytes)").arg(path).arg(QFileInfo(path).size()));
+        KisPart::instance()->removeDocument(inkOnly, true);
+    });
+
+    if (!PdfPageSaver::saveInkOnly(inkOnly, path, &why)) {
+        qWarning() << "pdfio: cannot save:" << why;
+        KisPart::instance()->removeDocument(inkOnly, true);
+    }
+#else
+    qWarning() << "pdfio: saving needs a PDF backend";
+#endif
 }
 
 bool PdfIoPlugin::openNotebook(const QString &pdfPath)
@@ -279,6 +315,11 @@ bool PdfIoPlugin::openNotebook(const QString &pdfPath)
     /// Activate the paintable layer inside Ink, not the group: opening on the group would leave
     /// the user unable to draw even once the layer exists.
     document->setCurrentImage(image, true, PdfProjectBuilder::inkStrokeLayer(image));
+
+    /// The save action has to find the project and the page again from the document alone.
+    document->setProperty("pdfioProjectDir", projectDir);
+    document->setProperty("pdfioPageIndex", manifest.pages.first().index);
+
     KisPart::instance()->addDocument(document);
 
     KisMainWindow *window = viewManager() ? viewManager()->mainWindow() : nullptr;
