@@ -170,9 +170,6 @@ private:
     bool showImage(KisImageSP image, KisNodeSP activeNode, int index,
                    const PdfStripLayout &layout, QString *why);
 
-    /// Locks every slot of the strip but one, so only the active page can be drawn on.
-    void lockSlotsBut(int activeSlot, int oldActiveSlot);
-
     QList<int> m_thumbnailQueue;
     QTimer *m_thumbnailTimer = nullptr;
 

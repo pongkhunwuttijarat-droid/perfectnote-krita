@@ -461,71 +461,13 @@ bool PdfPageNavigator::activateWithinStrip(int index, QString *why)
         return false;
     }
 
-    lockSlotsBut(slot, m_stripActiveSlot);
-
-    /// And make it the node Krita is working on, so the brush goes to this page and the layer
-    /// docker shows it. This is the same call the crash stack went through, reached deliberately
-    /// rather than by accident.
-    KisImageSP image = m_document->image();
-    KisNodeSP layer;
-    for (quint32 i = 0; i < image->root()->childCount(); ++i) {
-        KisNodeSP child = image->root()->at(i);
-        if (child->name() == PdfStripBuilder::inkGroupName(index) && child->childCount() > 0) {
-            layer = child->at(0);
-            break;
-        }
-    }
-
-    if (!layer) {
-        say(QStringLiteral("strip: no Ink layer named \"%1\" was found")
-                .arg(PdfStripBuilder::inkGroupName(index)));
-    }
-
-    if (layer && m_view && m_view->viewManager() && m_view->viewManager()->nodeManager()) {
-        KisNodeManager *manager = m_view->viewManager()->nodeManager();
-
-        /// Which document this manager is even looking at, and what it considers active. Activating
-        /// a node in the wrong document fails silently, and "active node did not move" is what the
-        /// user sees: strokes keep landing on the page they were on.
-        /// The view's own document: see the note in viewForDocument about why asking the view
-        /// manager is wrong.
-        KisDocument *viewDocument = m_view->document();
-        const bool sameDocument = viewDocument && m_document
-            && viewDocument->image() == m_document->image();
-
-        QStringList viewNotes;
-        const QList<QPointer<KisView>> allViews = KisPart::instance()->views();
-        for (const QPointer<KisView> &candidate : allViews) {
-            if (!candidate) {
-                continue;
-            }
-            KisDocument *theirDocument = candidate ? candidate->document() : nullptr;
-            const bool ours = theirDocument && m_document
-                && theirDocument->image() == m_document->image();
-            viewNotes.append(QStringLiteral("%1%2")
-                                 .arg(ours ? QStringLiteral("OURS") : QStringLiteral("other"))
-                                 .arg(candidate == m_view ? QStringLiteral("*m_view")
-                                                          : QString()));
-        }
-
-        say(QStringLiteral("strip: activating \"%1\", view's document is %2, views: [%3]")
-                .arg(layer->name())
-                .arg(sameDocument ? QStringLiteral("the strip") : QStringLiteral("SOMETHING ELSE"))
-                .arg(viewNotes.join(QLatin1Char(' '))));
-
-        /// Forced again here: the node manager follows the view manager's current view, and by the
-        /// time a page is turned the current view may have moved back to another document.
-        if (KisMainWindow *window = KisPart::instance()->currentMainwindow()) {
-            window->setActiveView(m_view);
-        }
-
-        /// The UI variant, not slotNonUiActivatedNode: that one was called and the active node
-        /// stayed where it was.
-        manager->slotUiActivatedNode(layer);
-
-        say(QStringLiteral("strip: active node after is \"%1\"")
-                .arg(manager->activeNode() ? manager->activeNode()->name() : QStringLiteral("(none)")));
-    }
+    /// No node is activated here, and that is the whole change.
+    ///
+    /// There used to be one ink group per page, and turning a page meant telling Krita which of
+    /// them was active. Nothing made that work in the running application -- strokes went on
+    /// landing on the first page whatever was called -- and the strip has one ink layer now, so
+    /// there is nothing to activate. Which page a stroke belongs to is decided when the page is
+    /// saved, by cropping the rectangle the page occupies.
 
     /// And show it. A strip holds several pages in one image, so making another page active does
     /// not move the view by itself: without this the page that just became active is the one the
@@ -542,37 +484,6 @@ bool PdfPageNavigator::activateWithinStrip(int index, QString *why)
     ensureThumbnail(index - 1);
     ensureThumbnail(index + 1);
     return true;
-}
-
-void PdfPageNavigator::lockSlotsBut(int activeSlot, int oldActiveSlot)
-{
-    Q_UNUSED(oldActiveSlot);
-
-    if (!m_document || !m_document->image()) {
-        return;
-    }
-
-    KisImageSP image = m_document->image();
-    for (int slot = 0; slot < m_stripPages.size(); ++slot) {
-        const int page = m_stripPages.at(slot);
-        if (page < 0) {
-            continue;
-        }
-
-        const bool active = (slot == activeSlot);
-
-        for (quint32 i = 0; i < image->root()->childCount(); ++i) {
-            KisNodeSP child = image->root()->at(i);
-            if (child->name() != PdfStripBuilder::inkGroupName(page)) {
-                continue;
-            }
-
-            child->setUserLocked(!active);
-            for (quint32 c = 0; c < child->childCount(); ++c) {
-                child->at(c)->setUserLocked(!active);
-            }
-        }
-    }
 }
 
 int PdfPageNavigator::scope() const
@@ -809,15 +720,14 @@ bool PdfPageNavigator::saveCurrentPage(QString *why)
         && m_stripActiveSlot < m_stripRects.size()) {
         pageArea = m_stripRects.at(m_stripActiveSlot);
 
+        /// The strip's one ink layer. The page this crop belongs to is decided here, by the
+        /// rectangle, rather than by which layer the strokes went into.
         for (quint32 i = 0; i < m_document->image()->root()->childCount(); ++i) {
             KisNodeSP child = m_document->image()->root()->at(i);
-            if (child->name() != PdfStripBuilder::inkGroupName(m_index)) {
-                continue;
+            if (child->name() == QStringLiteral("Ink")) {
+                inkLayers.append(child);
+                break;
             }
-            for (quint32 c = 0; c < child->childCount(); ++c) {
-                inkLayers.append(child->at(c));
-            }
-            break;
         }
     }
 

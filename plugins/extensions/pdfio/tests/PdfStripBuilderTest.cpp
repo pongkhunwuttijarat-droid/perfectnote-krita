@@ -29,7 +29,7 @@ class PdfStripBuilderTest : public QObject
 private Q_SLOTS:
     void testImageIsTheLayoutSize();
     void testEverySlotHasAPageAndAnInkGroup();
-    void testOnlyTheActiveSlotIsUnlocked();
+    void testOnlyTheInkLayerIsPaintable();
     void testPagesAreWhereTheLayoutSays();
     void testPaperIsBelowEveryInkGroup();
 
@@ -90,8 +90,8 @@ void PdfStripBuilderTest::testEverySlotHasAPageAndAnInkGroup()
                                                                backend, QString(), &why);
     QVERIFY2(strip.image, qPrintable(why));
 
-    /// Three pages: three backgrounds, three ink groups, and the desk underneath them all.
-    QCOMPARE(strip.image->root()->childCount(), 7u);
+    /// The desk, one layer of paper per page, and one ink layer over all of them.
+    QCOMPARE(strip.image->root()->childCount(), 5u);
     QCOMPARE(strip.image->root()->at(0)->name(), QStringLiteral("Desk"));
 
     for (const PdfStripLayout::Slot &slot : strip.layout.slots()) {
@@ -100,16 +100,16 @@ void PdfStripBuilderTest::testEverySlotHasAPageAndAnInkGroup()
         KisNodeSP background = childNamed(strip.image, PdfStripBuilder::backgroundLayerName(slot.page));
         QVERIFY(background);
         QVERIFY(qobject_cast<KisPaintLayer *>(background.data()));
-
-        KisNodeSP ink = childNamed(strip.image, PdfStripBuilder::inkGroupName(slot.page));
-        QVERIFY(ink);
-        QVERIFY(qobject_cast<KisGroupLayer *>(ink.data()));
-        QCOMPARE(ink->childCount(), 1u);
-        QVERIFY(qobject_cast<KisPaintLayer *>(ink->at(0).data()));
+        QVERIFY(background->userLocked());
     }
+
+    KisNodeSP ink = childNamed(strip.image, QStringLiteral("Ink"));
+    QVERIFY(ink);
+    QVERIFY(qobject_cast<KisPaintLayer *>(ink.data()));
+    QCOMPARE(KisNodeSP(ink), strip.activeInkLayer);
 }
 
-void PdfStripBuilderTest::testOnlyTheActiveSlotIsUnlocked()
+void PdfStripBuilderTest::testOnlyTheInkLayerIsPaintable()
 {
     PopplerRenderBackend backend;
     QVERIFY(backend.open(fixturePath()));
@@ -119,28 +119,20 @@ void PdfStripBuilderTest::testOnlyTheActiveSlotIsUnlocked()
                                                                backend, QString(), &why);
     QVERIFY2(strip.image, qPrintable(why));
 
-    const int activePage = strip.layout.activePage();
-    QVERIFY(activePage >= 0);
-    QVERIFY(strip.activeInkLayer);
-
+    /// The paper is never the user's to edit, and the ink layer is the one a stroke lands in.
+    ///
+    /// There used to be one ink group per page whose lock decided which page was writable, and that
+    /// needed Krita to be told which node was active. That never worked in the running application,
+    /// so there is one ink layer now and the page it belongs to is decided when the page is saved.
     for (const PdfStripLayout::Slot &slot : strip.layout.slots()) {
         KisNodeSP background = childNamed(strip.image, PdfStripBuilder::backgroundLayerName(slot.page));
-        KisNodeSP ink = childNamed(strip.image, PdfStripBuilder::inkGroupName(slot.page));
         QVERIFY(background);
-        QVERIFY(ink);
-
-        /// The page itself is never the user's to edit.
         QVERIFY(background->userLocked());
-
-        if (slot.page == activePage) {
-            QVERIFY2(!ink->userLocked(), "the active slot's ink must be paintable");
-            QVERIFY2(!ink->at(0)->userLocked(), "the active slot's layer must be paintable");
-            QCOMPARE(KisNodeSP(ink->at(0)), strip.activeInkLayer);
-        } else {
-            QVERIFY2(ink->userLocked(), "a neighbour's ink group must be locked");
-            QVERIFY2(ink->at(0)->userLocked(), "a neighbour's layer must be locked");
-        }
     }
+
+    KisNodeSP ink = childNamed(strip.image, QStringLiteral("Ink"));
+    QVERIFY(ink);
+    QVERIFY2(!ink->userLocked(), "the ink layer must be paintable");
 }
 
 void PdfStripBuilderTest::testPagesAreWhereTheLayoutSays()
@@ -180,30 +172,27 @@ void PdfStripBuilderTest::testPaperIsBelowEveryInkGroup()
     /// paper above this page's ink, and a stroke that strays outside its own page disappears behind
     /// the page below it -- reported exactly as "the active page did not change", because the
     /// stroke was there and hidden.
-    int lowestInk = std::numeric_limits<int>::max();
+    int inkIndex = -1;
     int highestPaper = -1;
 
     KisNodeSP root = strip.image->root();
     for (quint32 i = 0; i < root->childCount(); ++i) {
         const QString name = root->at(i)->name();
-        const int index = int(i);
-
         if (name == QStringLiteral("Desk")) {
             continue;
         }
 
-        const bool isInk = qobject_cast<KisGroupLayer *>(root->at(i).data()) != nullptr;
-        if (isInk) {
-            lowestInk = qMin(lowestInk, index);
+        if (name == QStringLiteral("Ink")) {
+            inkIndex = int(i);
         } else {
-            highestPaper = qMax(highestPaper, index);
+            highestPaper = qMax(highestPaper, int(i));
         }
     }
 
-    QVERIFY(lowestInk != std::numeric_limits<int>::max());
+    QVERIFY(inkIndex >= 0);
     QVERIFY(highestPaper >= 0);
-    QVERIFY2(lowestInk > highestPaper,
-             "every ink group has to sit above every page, or ink vanishes behind the next page");
+    QVERIFY2(inkIndex > highestPaper,
+             "the ink has to sit above every page, or ink vanishes behind the page below it");
 }
 
 QTEST_MAIN(PdfStripBuilderTest)

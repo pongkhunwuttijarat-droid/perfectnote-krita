@@ -124,40 +124,31 @@ PdfStripBuilder::Strip PdfStripBuilder::build(const PdfSessionManifest &manifest
         strip.image->addNode(background, strip.image->root());
     }
 
-    /// And then the ink of every page, above all of the paper.
-    for (int i = 0; i < slots.size(); ++i) {
-        const PdfStripLayout::Slot &slot = slots.at(i);
+    /// One ink layer for the whole strip, above all of the paper.
+    ///
+    /// It was one group per page, so that a page could be locked and its neighbour not. That needed
+    /// Krita to be told which layer was active every time a page was turned, and it turned out that
+    /// activating a node from a plugin does not take in the running application -- every stroke
+    /// went on landing on the first page whatever was done. A single layer cannot go wrong that
+    /// way: whatever is drawn lands in it, and the page it belongs to is decided when the page is
+    /// saved, by cropping the region that page occupies.
+    KisPaintLayerSP ink = new KisPaintLayer(strip.image, QStringLiteral("Ink"), OPACITY_OPAQUE_U8);
+
+    /// Every page's saved ink goes back into that one layer, at its own place in the strip.
+    for (const PdfStripLayout::Slot &slot : slots) {
         if (slot.page < 0) {
             continue;
         }
 
-        const bool active = (i == layout.activeSlot());
-
-        /// Restored if the page has been drawn on before, blank if not.
-        KisGroupLayerSP ink =
-            new KisGroupLayer(strip.image, inkGroupName(slot.page), OPACITY_OPAQUE_U8, colorSpace);
-        KisPaintLayerSP stroke = new KisPaintLayer(strip.image, inkLayerName(slot.page),
-                                                   OPACITY_OPAQUE_U8);
-
         const QImage savedInk =
             PdfInkLoader::loadInk(project.filePath(manifest.pages.at(slot.page).kraFile), nullptr);
         if (!savedInk.isNull()) {
-            stroke->paintDevice()->convertFromQImage(savedInk, nullptr,
-                                                     slot.rect.x(), slot.rect.y());
-        }
-
-        /// Locked together, group and layer, so that a stroke aimed at a neighbouring page is
-        /// refused by Krita rather than quietly landing somewhere it does not belong.
-        ink->setUserLocked(!active);
-        stroke->setUserLocked(!active);
-
-        strip.image->addNode(ink, strip.image->root());
-        strip.image->addNode(stroke, ink);
-
-        if (active) {
-            strip.activeInkLayer = stroke;
+            ink->paintDevice()->convertFromQImage(savedInk, nullptr, slot.rect.x(), slot.rect.y());
         }
     }
+
+    strip.image->addNode(ink, strip.image->root());
+    strip.activeInkLayer = ink;
 
     if (!strip.activeInkLayer) {
         fail(why, QStringLiteral("the strip has no paintable slot"));
