@@ -1557,7 +1557,9 @@ void KisPaintopBox::slotMoveToCenterMirrorY() {
 void KisPaintopBox::findDefaultPresets()
 {
     m_eraserName = "a) Eraser Circle";
-    m_defaultPresetName = "b) Basic-5 Size Opacity";
+    // A square tip makes the barrel rotation of the pen visible, so it is the
+    // preset Krita starts with on the tablets this build targets.
+    m_defaultPresetName = "b) Square Rotation";
 }
 
 void KisPaintopBox::updatePresetConfig()

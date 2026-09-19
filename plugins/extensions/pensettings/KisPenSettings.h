@@ -16,6 +16,19 @@
 
 class QModelIndex;
 
+/**
+ * Default gesture mapping, shared by the preferences page and the plugin.
+ *
+ * The page has to show the same values the plugin falls back to, otherwise opening
+ * the preferences and pressing OK would write "do nothing" over a working default.
+ */
+namespace PenSettingsDefaults {
+constexpr const char *Squeeze = "pen_show_popup_palette";
+constexpr const char *DoubleTap = "erase_action";
+constexpr const char *SlideUp = "increase_brush_size";
+constexpr const char *SlideDown = "decrease_brush_size";
+}
+
 class WdgPenSettings : public QWidget, public Ui::WdgPenSettings
 {
     Q_OBJECT

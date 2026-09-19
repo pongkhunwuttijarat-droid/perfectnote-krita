@@ -78,10 +78,10 @@ void PenSettings::slotLoadSettings()
 
     KConfigGroup cfg = KSharedConfig::openConfig()->group("PenSettings");
 
-    m_actionMap.insert(Gesture::Squeeze, cfg.readEntry("actionSqueeze", QStringLiteral("pen_show_popup_palette")));
-    m_actionMap.insert(Gesture::DoubleTap, cfg.readEntry("actionDoubleTap", QStringLiteral("erase_action")));
-    m_actionMap.insert(Gesture::SlideUp, cfg.readEntry("actionSlideUp", QStringLiteral("increase_brush_size")));
-    m_actionMap.insert(Gesture::SlideDown, cfg.readEntry("actionSlideDown", QStringLiteral("decrease_brush_size")));
+    m_actionMap.insert(Gesture::Squeeze, cfg.readEntry("actionSqueeze", QString::fromLatin1(PenSettingsDefaults::Squeeze)));
+    m_actionMap.insert(Gesture::DoubleTap, cfg.readEntry("actionDoubleTap", QString::fromLatin1(PenSettingsDefaults::DoubleTap)));
+    m_actionMap.insert(Gesture::SlideUp, cfg.readEntry("actionSlideUp", QString::fromLatin1(PenSettingsDefaults::SlideUp)));
+    m_actionMap.insert(Gesture::SlideDown, cfg.readEntry("actionSlideDown", QString::fromLatin1(PenSettingsDefaults::SlideDown)));
 }
 
 void PenSettings::slotTriggerPopupPalette()

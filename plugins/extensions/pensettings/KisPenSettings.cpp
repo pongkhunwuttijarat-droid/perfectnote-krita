@@ -103,18 +103,18 @@ void KisPenSettings::loadPreferences()
 {
     KConfigGroup cfg = KSharedConfig::openConfig()->group("PenSettings");
 
-    mUi->cmbSqueezeAction->setCurrentIndex(indexFromActionName(cfg.readEntry("actionSqueeze", QString())));
-    mUi->cmbDoubleTapAction->setCurrentIndex(indexFromActionName(cfg.readEntry("actionDoubleTap", QString())));
-    mUi->cmbSlideUpAction->setCurrentIndex(indexFromActionName(cfg.readEntry("actionSlideUp", QString())));
-    mUi->cmbSlideDownAction->setCurrentIndex(indexFromActionName(cfg.readEntry("actionSlideDown", QString())));
+    mUi->cmbSqueezeAction->setCurrentIndex(indexFromActionName(cfg.readEntry("actionSqueeze", QString::fromLatin1(PenSettingsDefaults::Squeeze))));
+    mUi->cmbDoubleTapAction->setCurrentIndex(indexFromActionName(cfg.readEntry("actionDoubleTap", QString::fromLatin1(PenSettingsDefaults::DoubleTap))));
+    mUi->cmbSlideUpAction->setCurrentIndex(indexFromActionName(cfg.readEntry("actionSlideUp", QString::fromLatin1(PenSettingsDefaults::SlideUp))));
+    mUi->cmbSlideDownAction->setCurrentIndex(indexFromActionName(cfg.readEntry("actionSlideDown", QString::fromLatin1(PenSettingsDefaults::SlideDown))));
 }
 
 void KisPenSettings::loadDefaultPreferences()
 {
-    mUi->cmbSqueezeAction->setCurrentIndex(indexFromActionName(QString("pen_show_popup_palette")));
-    mUi->cmbDoubleTapAction->setCurrentIndex(indexFromActionName(QString("erase_action")));
-    mUi->cmbSlideUpAction->setCurrentIndex(indexFromActionName(QString("increase_brush_size")));
-    mUi->cmbSlideDownAction->setCurrentIndex(indexFromActionName(QString("decrease_brush_size")));
+    mUi->cmbSqueezeAction->setCurrentIndex(indexFromActionName(QString::fromLatin1(PenSettingsDefaults::Squeeze)));
+    mUi->cmbDoubleTapAction->setCurrentIndex(indexFromActionName(QString::fromLatin1(PenSettingsDefaults::DoubleTap)));
+    mUi->cmbSlideUpAction->setCurrentIndex(indexFromActionName(QString::fromLatin1(PenSettingsDefaults::SlideUp)));
+    mUi->cmbSlideDownAction->setCurrentIndex(indexFromActionName(QString::fromLatin1(PenSettingsDefaults::SlideDown)));
 }
 
 QString KisPenSettings::actionNameForIndex(int index) const
