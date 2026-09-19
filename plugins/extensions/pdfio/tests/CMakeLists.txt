@@ -52,4 +52,33 @@ if (Poppler_Qt${QT_MAJOR_VERSION}_FOUND)
     add_test(NAME pdfio-PdfSessionTest COMMAND PdfSessionTest)
     set_tests_properties(pdfio-PdfSessionTest PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+    add_executable(PdfProjectBuilderTest
+        PdfProjectBuilderTest.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../backends/poppler/PopplerRenderBackend.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../session/PdfSession.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../session/PdfSessionManifest.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../session/PdfProjectBuilder.cpp
+        )
+
+    target_include_directories(PdfProjectBuilderTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+    target_link_libraries(PdfProjectBuilderTest PRIVATE
+        Qt${QT_MAJOR_VERSION}::Core
+        Qt${QT_MAJOR_VERSION}::Gui
+        Qt${QT_MAJOR_VERSION}::Test
+        Poppler::Qt${QT_MAJOR_VERSION}
+        kritaimage)
+
+    target_compile_definitions(PdfProjectBuilderTest PRIVATE
+        PDFIO_HAVE_POPPLER
+        FILES_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/")
+
+    set_target_properties(PdfProjectBuilderTest PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+    add_test(NAME pdfio-PdfProjectBuilderTest COMMAND PdfProjectBuilderTest)
+    set_tests_properties(pdfio-PdfProjectBuilderTest PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()

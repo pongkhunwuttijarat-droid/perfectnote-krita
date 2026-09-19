@@ -1,0 +1,46 @@
+/*
+ *  SPDX-FileCopyrightText: 2026 PerfectNote contributors
+ *
+ *  SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+#ifndef PDFPROJECTBUILDER_H
+#define PDFPROJECTBUILDER_H
+
+#include "session/PdfSessionManifest.h"
+
+#include <QString>
+
+#include <kis_types.h>
+
+class PdfRenderBackend;
+
+/**
+ * Turns one page record into the layer stack the user actually draws on.
+ *
+ * The PDF page becomes a **locked background layer**: it is the original artwork, not
+ * something to paint over, and locking it is also what makes "my notes are always in the Ink
+ * group" enforceable rather than a convention. Notes go into an empty "Ink" group above it,
+ * which is the only layer the session ever writes.
+ *
+ * Top level of an image is the page, not the document: one KisDocument per page is an
+ * accepted adaptation, and keeping the page as the image bounds means the PDF geometry and
+ * Krita's own coordinate system are the same thing.
+ */
+class PdfProjectBuilder
+{
+public:
+    static QString backgroundLayerName();
+    static QString inkLayerName();
+
+    /**
+     * Renders a page and builds the image around it. Returns a null image and sets a why on
+     * failure, for instance when the renderer cannot produce the page.
+     */
+    static KisImageSP buildPageImage(const PdfPageRecord &page,
+                                     PdfRenderBackend &backend,
+                                     qreal dpi,
+                                     QString *why = nullptr);
+};
+
+#endif // PDFPROJECTBUILDER_H
