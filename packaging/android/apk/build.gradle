@@ -20,6 +20,23 @@ dependencies {
     implementation fileTree(dir: 'libs', include: ['*.jar', '*.aar'])
 }
 
+/*
+ * The pen gestures and the barrel rotation come from the pen service of the ROM, reached
+ * with a plain Binder binding; none of the vendor implementation is bundled. The upstream
+ * template deliberately accepts *.aar here, so an accidental drop-in would be packaged
+ * silently, and this build must not redistribute the proprietary Xiaomi SDK. Fail loudly
+ * instead of changing the meaning of the upstream glob for every other dependency.
+ */
+def forbiddenVendorAars = fileTree(dir: 'libs', include: ['*PenEngine*.aar', '*pencilengine*.aar'])
+
+if (!forbiddenVendorAars.isEmpty()) {
+    throw new GradleException(
+        "Xiaomi PenEngine AAR detected in packaging/android/apk/libs/. " +
+        "This project uses the ROM Binder service directly and must not bundle " +
+        "the proprietary Xiaomi SDK."
+    )
+}
+
 ext {
     abi = System.getenv('ANDROID_ABI') ?: project.ext.properties['abi']
     ndkpath = System.getenv('KDECI_ANDROID_NDK_ROOT') ?: project.ext.properties['ndk.dir']  // TODO: Newer versions of Qt do support this dir
