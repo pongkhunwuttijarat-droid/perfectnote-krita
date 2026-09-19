@@ -1,6 +1,7 @@
 install( FILES
 a\)_Eraser_Circle.kpp
 b\)_Basic-5_Size_default.kpp
+b\)_Square_Rotation.kpp
 j\)_WaterC_Basic_Lines-Dry.kpp
 j\)_WaterC_Basic_Lines-Wet.kpp
 j\)_WaterC_Basic_Lines-Wet-Pattern.kpp

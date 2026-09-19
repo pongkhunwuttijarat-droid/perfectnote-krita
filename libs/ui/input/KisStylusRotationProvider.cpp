@@ -38,10 +38,16 @@ bool &hasValue()
 
 void setRotation(qreal degrees)
 {
-    // The vendor reports -180..180, while Krita's rotation sensor spans 0..360
-    // (KisDynamicSensorFactoryRegistry), so wrap it into range here.
+    // Keep the value in the -180..180 the Rotation sensor is built around:
+    // KisDynamicSensorRotation hands the event rotation to the option as
+    // rotation / 180, and that has to stay inside the sensor curve's own 0..1
+    // domain.  Wrapping to 0..360 instead would still produce the same dab angle
+    // for an identity curve, but it pushes the curve input out of range and makes
+    // any custom curve behave erratically.
     degrees = std::fmod(degrees, 360.0);
-    if (degrees < 0.0) {
+    if (degrees >= 180.0) {
+        degrees -= 360.0;
+    } else if (degrees < -180.0) {
         degrees += 360.0;
     }
 

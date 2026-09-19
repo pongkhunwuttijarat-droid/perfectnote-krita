@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ActionCollection version="2" name="Krita">
+  <Actions category="Krita">
+     <text>Pen Actions</text>
+
+     <Action name="stylus_squeeze">
+       <icon></icon>
+       <text>Squeeze the pen</text>
+       <whatsThis></whatsThis>
+       <toolTip></toolTip>
+       <iconText></iconText>
+       <activationFlags>10000</activationFlags>
+       <activationConditions>0</activationConditions>
+       <shortcut></shortcut>
+       <isCheckable>false</isCheckable>
+       <statusTip></statusTip>
+     </Action>
+
+     <Action name="stylus_double_tap">
+       <icon></icon>
+       <text>Double tap the pen</text>
+       <whatsThis></whatsThis>
+       <toolTip></toolTip>
+       <iconText></iconText>
+       <activationFlags>10000</activationFlags>
+       <activationConditions>0</activationConditions>
+       <shortcut></shortcut>
+       <isCheckable>false</isCheckable>
+       <statusTip></statusTip>
+     </Action>
+
+     <Action name="stylus_slide_up">
+       <icon></icon>
+       <text>Slide up on the pen</text>
+       <whatsThis></whatsThis>
+       <toolTip></toolTip>
+       <iconText></iconText>
+       <activationFlags>10000</activationFlags>
+       <activationConditions>0</activationConditions>
+       <shortcut></shortcut>
+       <isCheckable>false</isCheckable>
+       <statusTip></statusTip>
+     </Action>
+
+     <Action name="stylus_slide_down">
+       <icon></icon>
+       <text>Slide down on the pen</text>
+       <whatsThis></whatsThis>
+       <toolTip></toolTip>
+       <iconText></iconText>
+       <activationFlags>10000</activationFlags>
+       <activationConditions>0</activationConditions>
+       <shortcut></shortcut>
+       <isCheckable>false</isCheckable>
+       <statusTip></statusTip>
+     </Action>
+  </Actions>
+</ActionCollection>

@@ -20,4 +20,5 @@ add_subdirectory( dbexplorer )
 
 if (ANDROID)
     add_subdirectory( spensettings )
+    add_subdirectory( pensettings )
 endif()

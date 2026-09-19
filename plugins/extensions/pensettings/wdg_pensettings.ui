@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ui version="4.0">
+ <author>
+    SPDX-FileCopyrightText: 2026 PerfectNote contributors
+    SPDX-License-Identifier: GPL-3.0-or-later
+  </author>
+ <class>WdgPenSettings</class>
+ <widget class="QWidget" name="WdgPenSettings">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>601</width>
+    <height>488</height>
+   </rect>
+  </property>
+  <property name="sizePolicy">
+   <sizepolicy hsizetype="Expanding" vsizetype="Preferred">
+    <horstretch>0</horstretch>
+    <verstretch>0</verstretch>
+   </sizepolicy>
+  </property>
+  <layout class="QVBoxLayout" name="verticalLayout">
+   <item>
+    <widget class="QLabel" name="labelIntro">
+     <property name="text">
+      <string>Pick the action each pen gesture should run. These gestures are reported by the pen itself, so no keyboard shortcut is involved; configure them once in the tablet's own pen settings.</string>
+     </property>
+     <property name="wordWrap">
+      <bool>true</bool>
+     </property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="boxGestureActions">
+     <property name="sizePolicy">
+      <sizepolicy hsizetype="Expanding" vsizetype="Preferred">
+       <horstretch>0</horstretch>
+       <verstretch>0</verstretch>
+      </sizepolicy>
+     </property>
+     <property name="title">
+      <string>Gestures</string>
+     </property>
+     <layout class="QFormLayout" name="formLayout">
+      <item column="0" row="0">
+       <widget class="QLabel" name="labelSqueeze">
+        <property name="text">
+         <string>Squeeze</string>
+        </property>
+       </widget>
+      </item>
+      <item column="1" row="0">
+       <widget class="QComboBox" name="cmbSqueezeAction"/>
+      </item>
+      <item column="0" row="1">
+       <widget class="QLabel" name="labelDoubleTap">
+        <property name="text">
+         <string>Double tap</string>
+        </property>
+       </widget>
+      </item>
+      <item column="1" row="1">
+       <widget class="QComboBox" name="cmbDoubleTapAction"/>
+      </item>
+      <item column="0" row="2">
+       <widget class="QLabel" name="labelSlideUp">
+        <property name="text">
+         <string>Slide up</string>
+        </property>
+       </widget>
+      </item>
+      <item column="1" row="2">
+       <widget class="QComboBox" name="cmbSlideUpAction"/>
+      </item>
+      <item column="0" row="3">
+       <widget class="QLabel" name="labelSlideDown">
+        <property name="text">
+         <string>Slide down</string>
+        </property>
+       </widget>
+      </item>
+      <item column="1" row="3">
+       <widget class="QComboBox" name="cmbSlideDownAction"/>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="boxRotation">
+     <property name="title">
+      <string>Rotation</string>
+     </property>
+     <layout class="QVBoxLayout" name="rotationLayout">
+      <item>
+       <widget class="QLabel" name="labelRotation">
+        <property name="text">
+         <string>Barrel rotation is not an action: it is delivered to the brush engine as the &quot;Rotation&quot; sensor, so it is enabled per brush preset in the Brush Editor (F5).</string>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <spacer name="verticalSpacer">
+     <property name="orientation">
+      <enum>Qt::Vertical</enum>
+     </property>
+     <property name="sizeHint" stdset="0">
+      <size>
+       <width>20</width>
+       <height>40</height>
+      </size>
+     </property>
+    </spacer>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

@@ -1,0 +1,9 @@
+{
+    "Id": "Pen Settings",
+    "Type": "Service",
+    "X-KDE-Library": "kritapensettings",
+    "X-KDE-ServiceTypes": [
+        "Krita/ViewPlugin"
+    ],
+    "X-Krita-Version": "28"
+}

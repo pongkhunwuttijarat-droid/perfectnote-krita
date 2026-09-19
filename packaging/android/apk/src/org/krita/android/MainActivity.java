@@ -80,6 +80,7 @@ public class MainActivity extends QtActivity {
         mPenEngine = new PenEngineClient(this, new PenEngineClient.Listener() {
             @Override
             public void onStylusRotation(int degrees) {
+                Log.i(TAG, "stylus rotation=" + degrees);
                 JNIWrappers.stylusRotation(degrees);
             }
 
