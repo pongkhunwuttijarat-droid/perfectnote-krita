@@ -14,6 +14,8 @@
 #include <KisApplication.h>
 #include <KisMainWindow.h>
 #include <KisPart.h>
+
+#include "KisStylusRotationProvider.h"
 #include <kactioncollection.h>
 #include <kis_debug.h>
 
@@ -72,6 +74,25 @@ void triggerStylusGestureAction(jint keyCode)
 }
 
 } // namespace
+
+/**
+ * Barrel rotation from the vendor pen service. The value is decoded on the Java side
+ * (axis 17 * 360 on the vendor stream, which Qt does not read) and handed through here.
+ */
+extern "C" JNIEXPORT void JNICALL
+Java_org_krita_android_JNIWrappers_stylusRotation(JNIEnv * /*env*/, jobject /*obj*/,
+                                                   jint degrees)
+{
+    KisStylusRotationProvider::setRotation(qreal(degrees));
+
+    static int seen = 0;
+    if (++seen % 20 == 1) {
+        qDebug() << "[pen] rotation raw" << degrees
+                 << "stored" << KisStylusRotationProvider::rotation()
+                 << "active" << KisStylusRotationProvider::isActive()
+                 << "seen" << seen;
+    }
+}
 
 extern "C" JNIEXPORT void JNICALL
 Java_org_krita_android_JNIWrappers_stylusGestureKey(JNIEnv * /*env*/, jobject /*obj*/,

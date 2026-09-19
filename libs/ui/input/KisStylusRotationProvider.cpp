@@ -6,6 +6,8 @@
 
 #include <QElapsedTimer>
 
+#include <cmath>
+
 #include <KoPointerEvent.h>
 
 namespace KisStylusRotationProvider {
@@ -36,6 +38,13 @@ bool &hasValue()
 
 void setRotation(qreal degrees)
 {
+    // The vendor reports -180..180, while Krita's rotation sensor spans 0..360
+    // (KisDynamicSensorFactoryRegistry), so wrap it into range here.
+    degrees = std::fmod(degrees, 360.0);
+    if (degrees < 0.0) {
+        degrees += 360.0;
+    }
+
     storedRotation() = degrees;
     hasValue() = true;
     ageTimer().restart();
