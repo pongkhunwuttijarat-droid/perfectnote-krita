@@ -13,6 +13,7 @@
 #include <QStandardPaths>
 
 #include "backend/PdfRenderBackend.h"
+#include "session/PdfPageSaver.h"
 #include "session/PdfProjectBuilder.h"
 #include "session/PdfSession.h"
 
@@ -34,8 +35,11 @@ void fail(QString *why, const QString &message)
 
 void say(const QString &message)
 {
+    /// Both sinks: see the note in PdfIoProbe. On Android stderr goes nowhere and it is qWarning,
+    /// through Krita's Android log handler, that reaches logcat.
     fprintf(stderr, "[pdfio] %s\n", qPrintable(message));
     fflush(stderr);
+    qWarning("[pdfio] %s", qPrintable(message));
 }
 
 } // namespace
@@ -188,6 +192,15 @@ bool PdfPageNavigator::showPage(int index, QString *why)
     const QPointer<KisDocument> previousDocument = m_document;
     const QPointer<KisView> previousView = m_view;
 
+    /// The page being left is written before it is closed. This used to be missing, and turning a
+    /// page threw the ink away: the document was removed and nothing had ever been saved from it.
+    if (previousDocument && previousDocument->image()) {
+        QString saveError;
+        if (!saveCurrentPage(&saveError)) {
+            say(QStringLiteral("could not save the page being left: %1").arg(saveError));
+        }
+    }
+
     m_document = document;
     m_view = view;
     m_index = index;
@@ -201,6 +214,39 @@ bool PdfPageNavigator::showPage(int index, QString *why)
 
     say(QStringLiteral("page %1 of %2 open").arg(index + 1).arg(m_manifest.pages.size()));
     Q_EMIT pageChanged(m_index, pageCount(), QFileInfo(m_manifest.sourceFile).completeBaseName());
+    return true;
+}
+
+bool PdfPageNavigator::saveCurrentPage(QString *why)
+{
+    if (!m_document || !m_document->image() || m_index < 0 || m_index >= m_manifest.pages.size()) {
+        /// Nothing open is not a failure; it only means there is nothing to write.
+        return true;
+    }
+
+    /// The copy is made while the page is still alive, and it owns its own pixels, so the editing
+    /// document can be closed immediately afterwards.
+    KisDocument *inkOnly = PdfPageSaver::createInkOnlyDocument(m_document->image(), why);
+    if (!inkOnly) {
+        return false;
+    }
+
+    const QString path = QDir(m_projectDir).filePath(
+        PdfSession::pageFileName(m_manifest.pages.at(m_index).index));
+    QDir().mkpath(QFileInfo(path).absolutePath());
+
+    /// Deleted when the save reports back rather than by waiting: a nested event loop around
+    /// sigSavingFinished wedged on the second save.
+    QObject::connect(inkOnly, &KisDocument::sigSavingFinished, inkOnly, [inkOnly, path](const QString &) {
+        say(QStringLiteral("saved %1 (%2 bytes)").arg(path).arg(QFileInfo(path).size()));
+        KisPart::instance()->removeDocument(inkOnly, true);
+    });
+
+    if (!PdfPageSaver::saveInkOnly(inkOnly, path, why)) {
+        KisPart::instance()->removeDocument(inkOnly, true);
+        return false;
+    }
+
     return true;
 }
 

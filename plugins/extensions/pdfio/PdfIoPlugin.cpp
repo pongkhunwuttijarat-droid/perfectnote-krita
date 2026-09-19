@@ -110,12 +110,25 @@ PdfIoPlugin::PdfIoPlugin(QObject *parent, const QVariantList &)
         /// Temporary, and deliberately not the picker: this drives the very same open path with a
         /// file that is already on the device, so the crash reproduces unattended and the step
         /// logging in the navigator can be read straight out of logcat.
-        const QString fixture = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
-                                    .filePath(QStringLiteral("pdfio-fixture.pdf"));
-        QString why;
-        say(QStringLiteral("opening %1 through the real path").arg(fixture));
-        const bool ok = PdfPageNavigator::instance()->openNotebook(fixture, &why);
-        say(QStringLiteral("openNotebook = %1 (%2)").arg(ok).arg(why));
+        const QDir cache(QStandardPaths::writableLocation(QStandardPaths::TempLocation));
+
+        /// The file that was picked last is the one that crashed, so it is opened first when it is
+        /// still there. The fixture is the known-good control.
+        const QStringList candidates = {
+            cache.filePath(QStringLiteral("pdfio-picked.pdf")),
+            cache.filePath(QStringLiteral("pdfio-fixture.pdf")),
+        };
+
+        for (const QString &candidate : candidates) {
+            if (!QFileInfo::exists(candidate)) {
+                continue;
+            }
+            QString why;
+            say(QStringLiteral("opening %1 (%2 bytes) through the real path")
+                    .arg(candidate).arg(QFileInfo(candidate).size()));
+            const bool ok = PdfPageNavigator::instance()->openNotebook(candidate, &why);
+            say(QStringLiteral("openNotebook = %1 (%2)").arg(ok).arg(why));
+        }
         return;
 #endif
         const int scale = qEnvironmentVariableIntValue("PDFIO_PROBE_SCALE");

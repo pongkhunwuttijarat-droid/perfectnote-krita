@@ -56,6 +56,14 @@ private:
     /// Closes the page that is open, freeing its document and its view.
     void closeCurrentPage();
 
+    /**
+     * Writes the ink of the page that is open, if one is.
+     *
+     * Called before a page is left behind, not only when the user asks: turning a page used to
+     * remove the document, and nothing had ever been saved from it, so the ink went with it.
+     */
+    bool saveCurrentPage(QString *why = nullptr);
+
     static QString projectRoot();
 
     QString m_projectDir;
