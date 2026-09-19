@@ -38,6 +38,7 @@
 #include <KisDocument.h>
 #include <KisMainWindow.h>
 #include <KisViewManager.h>
+#include <KisViewManager.h>
 #include <KisPart.h>
 #include <KisView.h>
 
@@ -48,6 +49,31 @@ void fail(QString *why, const QString &message)
     if (why) {
         *why = message;
     }
+}
+
+/// The view that is actually showing \a document.
+///
+/// Not the value addViewAndNotifyLoadingCompleted() returns: that came back as the view of a
+/// different document, so activating an ink layer, adding the strip decoration, setting the zoom
+/// and scrolling to a page were all being done to the wrong one -- which is why strokes kept
+/// landing on the page they started on. KisPart knows the views; this asks it.
+KisView *viewForDocument(KisDocument *document)
+{
+    if (!document) {
+        return nullptr;
+    }
+
+    /// KisView::document(), not viewManager()->document(). The view manager belongs to the main
+    /// window and its document() returns the document of whichever view is *active*, so asking it
+    /// reports the wrong document for every other view -- which is how this ended up activating an
+    /// ink layer in one document while pointing at another.
+    const QList<QPointer<KisView>> views = KisPart::instance()->views();
+    for (const QPointer<KisView> &view : views) {
+        if (view && view->document() == document) {
+            return view;
+        }
+    }
+    return nullptr;
 }
 
 void say(const QString &message)
@@ -450,8 +476,55 @@ bool PdfPageNavigator::activateWithinStrip(int index, QString *why)
         }
     }
 
+    if (!layer) {
+        say(QStringLiteral("strip: no Ink layer named \"%1\" was found")
+                .arg(PdfStripBuilder::inkGroupName(index)));
+    }
+
     if (layer && m_view && m_view->viewManager() && m_view->viewManager()->nodeManager()) {
-        m_view->viewManager()->nodeManager()->slotNonUiActivatedNode(layer);
+        KisNodeManager *manager = m_view->viewManager()->nodeManager();
+
+        /// Which document this manager is even looking at, and what it considers active. Activating
+        /// a node in the wrong document fails silently, and "active node did not move" is what the
+        /// user sees: strokes keep landing on the page they were on.
+        /// The view's own document: see the note in viewForDocument about why asking the view
+        /// manager is wrong.
+        KisDocument *viewDocument = m_view->document();
+        const bool sameDocument = viewDocument && m_document
+            && viewDocument->image() == m_document->image();
+
+        QStringList viewNotes;
+        const QList<QPointer<KisView>> allViews = KisPart::instance()->views();
+        for (const QPointer<KisView> &candidate : allViews) {
+            if (!candidate) {
+                continue;
+            }
+            KisDocument *theirDocument = candidate ? candidate->document() : nullptr;
+            const bool ours = theirDocument && m_document
+                && theirDocument->image() == m_document->image();
+            viewNotes.append(QStringLiteral("%1%2")
+                                 .arg(ours ? QStringLiteral("OURS") : QStringLiteral("other"))
+                                 .arg(candidate == m_view ? QStringLiteral("*m_view")
+                                                          : QString()));
+        }
+
+        say(QStringLiteral("strip: activating \"%1\", view's document is %2, views: [%3]")
+                .arg(layer->name())
+                .arg(sameDocument ? QStringLiteral("the strip") : QStringLiteral("SOMETHING ELSE"))
+                .arg(viewNotes.join(QLatin1Char(' '))));
+
+        /// Forced again here: the node manager follows the view manager's current view, and by the
+        /// time a page is turned the current view may have moved back to another document.
+        if (KisMainWindow *window = KisPart::instance()->currentMainwindow()) {
+            window->setActiveView(m_view);
+        }
+
+        /// The UI variant, not slotNonUiActivatedNode: that one was called and the active node
+        /// stayed where it was.
+        manager->slotUiActivatedNode(layer);
+
+        say(QStringLiteral("strip: active node after is \"%1\"")
+                .arg(manager->activeNode() ? manager->activeNode()->name() : QStringLiteral("(none)")));
     }
 
     /// And show it. A strip holds several pages in one image, so making another page active does
@@ -604,6 +677,26 @@ bool PdfPageNavigator::showImage(KisImageSP image, KisNodeSP activeNode, int ind
     KisView *view = window ? window->addViewAndNotifyLoadingCompleted(document) : nullptr;
     say(QStringLiteral("view %1").arg(view ? "created" : "NOT created"));
 
+    /// And the one that is really showing this document, rather than whatever that call returned.
+    if (KisView *mine = viewForDocument(document)) {
+        view = mine;
+    } else {
+        say(QStringLiteral("view: no view claims this document; acting on the wrong one is likely"));
+    }
+
+    /// And make it the one Krita is working in, unconditionally.
+    ///
+    /// activeView() can already report this view while the view manager's current view is still
+    /// another one, and it is the view manager that the node manager follows -- so the guarded
+    /// version of this call did nothing, and activating an ink layer went on being a no-op against
+    /// a different document. Every stroke stayed on the page it started on.
+    if (view && window) {
+        window->setActiveView(view);
+        say(QStringLiteral("view: set as the active view (activeView was %1)")
+                .arg(window->activeView() == view ? QStringLiteral("already this one")
+                                                  : QStringLiteral("another one")));
+    }
+
     /// The neighbouring pages are shown by the view that has just been created, not by whichever
     /// one this code happens to be running in.
     if (view && view->canvasBase()
@@ -612,18 +705,42 @@ bool PdfPageNavigator::showImage(KisImageSP image, KisNodeSP activeNode, int ind
             KisCanvasDecorationSP(new PdfPageStripDecoration(QStringLiteral("pdfioPageStrip"), view)));
     }
 
-    /// Fitted to width, not to the document. A strip is several pages tall, so a view fitted to the
-    /// whole document shows every page at once and each of them far too small to read -- which is
-    /// what "it is not full screen" looked like. Fitting the width makes a page fill the window,
-    /// and the view is then moved to whichever page is active.
+    /// Zoomed to the active page, not to the document. A strip is several pages tall, so a view
+    /// fitted to the whole document shows all of them at once at eight percent, and nothing is
+    /// legible -- which is what "it is not full screen" looked like.
     ///
-    /// Deferred, because the view has not been laid out yet the moment it is created.
+    /// The zoom is worked out here rather than asked for by mode: ZOOM_WIDTH was tried and left the
+    /// view at eight percent, so the arithmetic is done against the canvas the view actually got.
+    /// Deferred, because the view has no size at all the moment it is created.
     if (layout.isValid() && view) {
         const QPointer<KisView> viewGuard = view;
-        QTimer::singleShot(400, this, [viewGuard]() {
-            if (viewGuard && viewGuard->canvasController()) {
-                viewGuard->canvasController()->setZoom(KoZoomMode::ZOOM_WIDTH, 1.0);
+        const QRect pageRect = layout.slots().at(layout.activeSlot()).rect;
+
+        QTimer::singleShot(400, this, [viewGuard, pageRect]() {
+            if (!viewGuard || !viewGuard->canvasController() || !viewGuard->canvasBase()) {
+                return;
             }
+
+            QWidget *widget = viewGuard->canvasBase()->canvasWidget();
+            const QSize viewport = widget ? widget->size() : QSize();
+            if (viewport.isEmpty() || pageRect.isEmpty()) {
+                say(QStringLiteral("zoom: no viewport (%1x%2) to fit a %3x%4 page into")
+                        .arg(viewport.width()).arg(viewport.height())
+                        .arg(pageRect.width()).arg(pageRect.height()));
+                return;
+            }
+
+            const qreal zoom = qBound(qreal(0.02),
+                                      qMin(qreal(viewport.width()) / pageRect.width(),
+                                           qreal(viewport.height()) / pageRect.height()),
+                                      qreal(8.0));
+
+            say(QStringLiteral("zoom: fitting a %1x%2 page into a %3x%4 viewport gives %5")
+                    .arg(pageRect.width()).arg(pageRect.height())
+                    .arg(viewport.width()).arg(viewport.height()).arg(zoom));
+
+            viewGuard->canvasController()->setZoom(KoZoomMode::ZOOM_CONSTANT, zoom);
+            viewGuard->canvasController()->ensureVisibleDoc(QRectF(pageRect), true);
         });
     }
 

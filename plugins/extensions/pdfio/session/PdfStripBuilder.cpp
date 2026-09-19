@@ -44,7 +44,9 @@ QString PdfStripBuilder::backgroundLayerName(int page)
 
 QString PdfStripBuilder::inkLayerName(int page)
 {
-    return QStringLiteral("Layer 1");
+    /// Named after its page. Every page having a layer called "Layer 1" is legal -- they live in
+    /// different groups -- and it made every log line and every layer panel entry ambiguous.
+    return QStringLiteral("Ink strokes %1").arg(page + 1);
 }
 
 PdfStripBuilder::Strip PdfStripBuilder::build(const PdfSessionManifest &manifest,
