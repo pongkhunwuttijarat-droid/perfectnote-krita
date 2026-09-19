@@ -166,7 +166,15 @@ private:
     /// The price is that the window is rebuilt every other turn, because rolling it -- repainting
     /// the one slot that goes out instead of building a new strip -- is not written yet. That is
     /// the piece that will make a run of turns continuous.
-    int m_scope = 3;
+    /// One page at a time, which is design A: one document per page, one view per page, the shape
+    /// this was built and verified in -- open, draw, turn with an automatic save, export, and the
+    /// ink coming back where it was drawn.
+    ///
+    /// The strip, design B, is behind this number and is not working well enough to ship: pages
+    /// above and below in one document, the window rolling rather than rebuilding, the active page
+    /// following the middle of the viewport. Raising it to three turns that on. It is left at one
+    /// deliberately, so the notebook is usable while the strip is finished.
+    int m_scope = 1;
     qreal m_dpi = 200.0;
 
     /// The pages the open strip holds and where each sits. Empty when the document is a single
