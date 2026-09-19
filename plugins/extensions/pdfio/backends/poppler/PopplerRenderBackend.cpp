@@ -70,3 +70,15 @@ QImage PopplerRenderBackend::renderPage(int index, qreal dpi) const
     }
     return page->renderToImage(dpi, dpi);
 }
+
+QString PopplerRenderBackend::pageText(int index) const
+{
+    if (!m_document) {
+        return QString();
+    }
+    std::unique_ptr<Poppler::Page> page = m_document->page(index);
+    if (!page) {
+        return QString();
+    }
+    return page->text(QRectF());
+}

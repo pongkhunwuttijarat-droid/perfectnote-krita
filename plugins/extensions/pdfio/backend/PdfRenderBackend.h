@@ -53,6 +53,14 @@ public:
      * renderers (pdftoppm gave 834 px where Poppler Qt gave 833 for the same page).
      */
     virtual QImage renderPage(int index, qreal dpi) const = 0;
+
+    /**
+     * The selectable text of a page.
+     *
+     * Used to check that an export did not turn the source into a picture: the exporter never
+     * rewrites an original object, so the text has to come back out.
+     */
+    virtual QString pageText(int index) const = 0;
 };
 
 #endif // PDFRENDERBACKEND_H

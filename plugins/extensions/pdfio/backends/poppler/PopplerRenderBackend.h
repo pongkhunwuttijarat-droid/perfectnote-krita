@@ -24,6 +24,7 @@ public:
     int pageCount() const override;
     PdfPageInfo pageInfo(int index) const override;
     QImage renderPage(int index, qreal dpi) const override;
+    QString pageText(int index) const override;
 
 private:
     std::unique_ptr<Poppler::Document> m_document;
