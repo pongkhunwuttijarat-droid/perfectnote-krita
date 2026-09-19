@@ -12,6 +12,7 @@
 #include <QObject>
 #include <QPointer>
 #include <QString>
+#include <QTimer>
 
 class KisDocument;
 class KisView;
@@ -42,6 +43,22 @@ public:
 
     bool hasNotebook() const;
 
+    /// The document of the page that is open, if one is.
+    KisDocument *currentDocument() const;
+
+    /// The view showing it, for code that needs the canvas rather than the document.
+    KisView *currentView() const;
+
+    /**
+     * Whether panning past the edge of a page turns to the next one.
+     *
+     * Off is a reasonable choice: the gesture that turns a page is the same one used to look at
+     * the bottom of a page, and someone who reads that way will not want the notebook moving
+     * under them.
+     */
+    bool scrollFollowEnabled() const;
+    void setScrollFollowEnabled(bool enabled);
+
     /// What the export needs to walk the notebook and find its source.
     const PdfSessionManifest &manifest() const;
     QString sourcePath() const;
@@ -70,11 +87,37 @@ private:
 
     static QString projectRoot();
 
+    /// Acts on where the middle of the view has settled.
+    void checkScrollFollow();
+
+    /**
+     * Which page the given document point falls on: the open one, a neighbour above or below it,
+     * or -1 for none. The layout is the one the strip decoration draws, so the two agree about
+     * where the neighbouring pages are.
+     */
+    int pageAtDocumentPoint(const QPointF &point, qreal zoom) const;
+
     QString m_projectDir;
     PdfSessionManifest m_manifest;
     QPointer<KisDocument> m_document;
     QPointer<KisView> m_view;
     int m_index = -1;
+
+    bool m_scrollFollow = true;
+    QTimer *m_scrollWatch = nullptr;
+
+    /// So one continued gesture does not turn several pages.
+    qint64 m_lastTurn = 0;
+
+    /// The page the middle of the view is over, and since when, so a page is only turned to once
+    /// the view has stopped there.
+    int m_candidatePage = -1;
+    qint64 m_candidateSince = 0;
+
+    /// The furthest a page has been panned past its own edge, in widget pixels. Reported because
+    /// it decides whether this feature can work at all: if the canvas clamps panning to the page,
+    /// nothing is ever reachable and the threshold never fires.
+    qreal m_maxOvershoot = 0;
 };
 
 #endif // PDFPAGENAVIGATOR_H

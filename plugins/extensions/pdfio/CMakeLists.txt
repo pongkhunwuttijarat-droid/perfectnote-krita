@@ -3,6 +3,7 @@ set(kritapdfio_SOURCES
     PdfIoPlugin.cpp
     PdfIoProbe.cpp
     PdfPageNavigator.cpp
+    PdfPageStripDecoration.cpp
     PdfRendererSpike.cpp
     backend/PdfRenderBackendCreate.cpp
     session/PdfExporter.cpp

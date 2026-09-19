@@ -29,6 +29,19 @@
        <statusTip></statusTip>
      </Action>
 
+     <Action name="pdfio_follow_scrolling">
+       <icon></icon>
+       <text>Turn pages by panning</text>
+       <whatsThis></whatsThis>
+       <toolTip></toolTip>
+       <iconText></iconText>
+       <activationFlags>10000</activationFlags>
+       <activationConditions>0</activationConditions>
+       <shortcut></shortcut>
+       <isCheckable>true</isCheckable>
+       <statusTip></statusTip>
+     </Action>
+
      <Action name="pdfio_export_pdf">
        <icon></icon>
        <text>Export the notebook to PDF</text>

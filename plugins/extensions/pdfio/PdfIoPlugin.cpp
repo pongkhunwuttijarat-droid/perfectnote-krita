@@ -20,6 +20,7 @@
 #include <QFileInfo>
 #include <QMenu>
 #include <QMenuBar>
+#include <QScrollBar>
 #include <QTimer>
 
 /// Not behind PDFIO_HAVE_POPPLER: the session, the saver, the ink loader and the exporter are all
@@ -28,12 +29,22 @@
 #include "session/PdfExporter.h"
 #include "session/PdfInkLoader.h"
 #include "session/PdfPageSaver.h"
+#include "session/PdfProjectBuilder.h"
 #include "session/PdfSession.h"
 
 #include <QHash>
 #include <QImage>
 
 #include <KoDocumentInfo.h>
+
+#include <kis_canvas2.h>
+#include <kis_coordinates_converter.h>
+#include <kis_paint_device.h>
+#include <kis_paint_layer.h>
+
+#include <KisView.h>
+
+#include <KoColor.h>
 
 #include <KisDocument.h>
 #include <KisMainWindow.h>
@@ -115,6 +126,14 @@ PdfIoPlugin::PdfIoPlugin(QObject *parent, const QVariantList &)
         /// Android is driven by the menu action. The unattended route that opened a file from the
         /// cache at startup is gone: it existed to reproduce the open path crash, and it found it.
         /// Opening a document automatically on every launch would only surprise the user now.
+        if (qEnvironmentVariableIntValue("PDFIO_PROBE_PAN") > 0) {
+            runPanProbe();
+            return;
+        }
+        if (qEnvironmentVariableIntValue("PDFIO_PROBE_RESTORE") > 0) {
+            runRestoreProbe();
+            return;
+        }
         const int scale = qEnvironmentVariableIntValue("PDFIO_PROBE_SCALE");
         if (scale > 0) {
             runScaleProbe(scale);
@@ -168,6 +187,22 @@ void PdfIoPlugin::registerActions()
         /// Creating an action does not put it anywhere. Without this the plugin is invisible.
         if (menu) {
             menu->addAction(action);
+        }
+    }
+
+    /// A switch rather than a plain action: turning pages by panning is the same gesture as
+    /// looking at the bottom of a page, and whoever reads that way will want it off.
+    KisAction *followAction =
+        viewManager()->actionManager()->createAction(QStringLiteral("pdfio_follow_scrolling"));
+    if (followAction) {
+        followAction->setCheckable(true);
+        followAction->setChecked(PdfPageNavigator::instance()->scrollFollowEnabled());
+        connect(followAction, &KisAction::toggled, this, [](bool enabled) {
+            PdfPageNavigator::instance()->setScrollFollowEnabled(enabled);
+        });
+        if (menu) {
+            menu->addSeparator();
+            menu->addAction(followAction);
         }
     }
 }
@@ -338,6 +373,148 @@ bool PdfIoPlugin::openNotebook(const QString &pdfPath)
         say(QStringLiteral("openNotebook failed: %1").arg(why));
     }
     return opened;
+}
+
+void PdfIoPlugin::runRestoreProbe()
+{
+    PdfPageNavigator *navigator = PdfPageNavigator::instance();
+    QString why;
+
+    if (!navigator->openNotebook(qEnvironmentVariable("PDFIO_PROBE"), &why)) {
+        say(QStringLiteral("restore: cannot open the notebook: %1").arg(why));
+        return;
+    }
+
+    /// Draw a mark into the Ink layer of whatever page is open.
+    KisDocument *opened = navigator->currentDocument();
+    if (!opened) {
+        say(QStringLiteral("restore: no document is open"));
+        return;
+    }
+
+    KisImageSP image = opened->image();
+    KisPaintLayer *stroke = qobject_cast<KisPaintLayer *>(PdfProjectBuilder::inkStrokeLayer(image).data());
+    if (!stroke) {
+        say(QStringLiteral("restore: no paintable Ink layer"));
+        return;
+    }
+    stroke->paintDevice()->fill(QRect(100, 100, 200, 40), KoColor(Qt::black, image->colorSpace()));
+    say(QStringLiteral("restore: drew a mark, ink bounds now %1,%2 %3x%4")
+            .arg(stroke->paintDevice()->exactBounds().x())
+            .arg(stroke->paintDevice()->exactBounds().y())
+            .arg(stroke->paintDevice()->exactBounds().width())
+            .arg(stroke->paintDevice()->exactBounds().height()));
+
+    Q_UNUSED(why);
+
+    /// Each turn on a tick of its own, the way a person takes them -- and not only for realism:
+    /// the page left behind is closed on a later turn of the event loop, so turning twice inside
+    /// one call stacks three views and Krita's window handling wedges. The probe wedged there
+    /// twice before this was understood.
+    QTimer::singleShot(600, this, [this, navigator]() {
+        QString why;
+        if (!navigator->next(&why)) {
+            say(QStringLiteral("restore: cannot turn forward: %1").arg(why));
+            return;
+        }
+        say(QStringLiteral("restore: turned to page %1").arg(navigator->currentIndex() + 1));
+
+        QTimer::singleShot(600, this, [this, navigator]() {
+            QString why;
+            if (!navigator->previous(&why)) {
+                say(QStringLiteral("restore: cannot turn back: %1").arg(why));
+                return;
+            }
+            say(QStringLiteral("restore: turned back to page %1").arg(navigator->currentIndex() + 1));
+
+            QTimer::singleShot(600, this, [navigator]() {
+                /// Not a ternary: document->image() hands back a weak pointer, and a conditional
+                /// cannot mix that with a strong one.
+                KisDocument *returned = navigator->currentDocument();
+                if (!returned) {
+                    say(QStringLiteral("restore: nothing is open after turning back"));
+                    return;
+                }
+                KisImageSP back = returned->image();
+                KisPaintLayer *backStroke =
+                    qobject_cast<KisPaintLayer *>(PdfProjectBuilder::inkStrokeLayer(back).data());
+                if (!backStroke) {
+                    say(QStringLiteral("restore: the returned page has no Ink layer"));
+                    return;
+                }
+
+                const QRect bounds = backStroke->paintDevice()->exactBounds();
+                say(QStringLiteral("restore: back on page %1, ink bounds %2,%3 %4x%5  (expected 100,100 200x40)")
+                        .arg(navigator->currentIndex() + 1)
+                        .arg(bounds.x()).arg(bounds.y())
+                        .arg(bounds.width()).arg(bounds.height()));
+            });
+        });
+    });
+}
+
+void PdfIoPlugin::runPanProbe()
+{
+    PdfPageNavigator *navigator = PdfPageNavigator::instance();
+    QString why;
+    if (!navigator->openNotebook(qEnvironmentVariable("PDFIO_PROBE"), &why)) {
+        say(QStringLiteral("pan: cannot open the notebook: %1").arg(why));
+        return;
+    }
+
+    QTimer::singleShot(900, this, [navigator]() {
+        KisView *view = navigator->currentView();
+        KisDocument *document = navigator->currentDocument();
+        if (!view || !view->canvasBase() || !document || !document->image()) {
+            say(QStringLiteral("pan: no canvas to measure"));
+            return;
+        }
+
+        KisCanvas2 *canvas = view->canvasBase();
+        const KisCoordinatesConverter *converter = canvas->coordinatesConverter();
+        QWidget *widget = canvas->canvasWidget();
+        if (!converter || !widget) {
+            say(QStringLiteral("pan: no converter"));
+            return;
+        }
+
+        const QRectF pageRect(0, 0, document->image()->width(), document->image()->height());
+
+        QScrollBar *vertical = nullptr;
+        QScrollBar *horizontal = nullptr;
+        const QList<QScrollBar *> bars = widget->findChildren<QScrollBar *>();
+        for (QScrollBar *bar : bars) {
+            say(QStringLiteral("pan: %1 scrollbar range %2..%3 value %4 pageStep %5 widget %6x%7")
+                    .arg(bar->orientation() == Qt::Vertical ? QStringLiteral("vertical")
+                                                            : QStringLiteral("horizontal"))
+                    .arg(bar->minimum()).arg(bar->maximum()).arg(bar->value())
+                    .arg(bar->pageStep()).arg(widget->width()).arg(widget->height()));
+            if (bar->orientation() == Qt::Vertical) {
+                vertical = bar;
+            } else {
+                horizontal = bar;
+            }
+        }
+
+        const QRectF pageOnScreen = converter->documentToWidget(pageRect);
+        say(QStringLiteral("pan: page on screen %1,%2 %3x%4, viewport %5x%6")
+                .arg(pageOnScreen.x()).arg(pageOnScreen.y())
+                .arg(pageOnScreen.width()).arg(pageOnScreen.height())
+                .arg(widget->width()).arg(widget->height()));
+
+        if (vertical) {
+            vertical->setValue(vertical->maximum());
+            const QRectF atBottom = converter->documentToWidget(pageRect);
+            say(QStringLiteral("pan: at the very bottom the page bottom sits at %1 of %2")
+                    .arg(atBottom.bottom()).arg(widget->height()));
+        }
+        if (horizontal) {
+            horizontal->setValue(horizontal->maximum());
+            const QRectF atRight = converter->documentToWidget(pageRect);
+            say(QStringLiteral("pan: at the far right the page right sits at %1 of %2")
+                    .arg(atRight.right()).arg(widget->width()));
+        }
+    });
 }
 
 void PdfIoPlugin::runScaleProbe(int pages)

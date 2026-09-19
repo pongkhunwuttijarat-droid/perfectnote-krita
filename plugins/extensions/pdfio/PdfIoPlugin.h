@@ -48,6 +48,15 @@ private:
     /// number of live documents after each, so the scaling with page count is visible rather
     /// than guessed.
     void runScaleProbe(int pages);
+
+    /// Temporary: draws on a page, turns away from it and comes back, which is the round trip a
+    /// user actually performs and the only way to see whether the ink survived it.
+    void runRestoreProbe();
+
+    /// Temporary: reports how far the canvas lets a page be panned past its own edge. The answer
+    /// decides whether any of the turning-by-scrolling ideas can work, because a page that cannot
+    /// be left behind never puts the centre of the view over a neighbour.
+    void runPanProbe();
 };
 
 #endif // PDFIOPLUGIN_H

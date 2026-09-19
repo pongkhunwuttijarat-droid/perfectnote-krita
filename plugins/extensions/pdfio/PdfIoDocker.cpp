@@ -7,8 +7,12 @@
 #include "PdfIoDocker.h"
 #include "PdfPageNavigator.h"
 
+#include <QDir>
+#include <QFileInfo>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QLabel>
+#include <QPixmap>
 #include <QListWidget>
 #include <QPushButton>
 #include <QVBoxLayout>
@@ -83,10 +87,28 @@ PdfIoDocker::~PdfIoDocker() = default;
 
 void PdfIoDocker::refresh(int index, int pageCount, const QString &label)
 {
+    PdfPageNavigator *navigator = PdfPageNavigator::instance();
+    const QDir project(navigator->projectDir());
+
+    /// Rebuilt when the notebook changes, and the entry for the page that just changed is given a
+    /// fresh icon: a page saves its thumbnail on the way out, so by the time this runs the page
+    /// that was left behind has one and the list should show it.
     if (m_pages->count() != pageCount) {
         m_pages->clear();
         for (int i = 0; i < pageCount; ++i) {
-            m_pages->addItem(pageLabel(i));
+            m_pages->addItem(new QListWidgetItem(pageLabel(i)));
+        }
+    }
+
+    if (index >= 0 && index < pageCount && index < navigator->manifest().pages.size()) {
+        const QString thumbPath =
+            project.filePath(navigator->manifest().pages.at(index).thumbFile);
+        if (QFileInfo::exists(thumbPath)) {
+            const QPixmap pixmap(thumbPath);
+            if (!pixmap.isNull()) {
+                m_pages->item(index)->setIcon(QIcon(pixmap.scaled(128, 128, Qt::KeepAspectRatio,
+                                                                  Qt::SmoothTransformation)));
+            }
         }
     }
 

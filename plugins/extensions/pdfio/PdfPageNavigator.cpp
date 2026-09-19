@@ -8,16 +8,27 @@
 
 #include <cstdio>
 
+#include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
+#include <QWidget>
 #include <QStandardPaths>
+#include <QTimer>
 
 #include "backend/PdfRenderBackend.h"
+#include "PdfPageStripDecoration.h"
+#include "session/PdfInkLoader.h"
 #include "session/PdfPageSaver.h"
 #include "session/PdfProjectBuilder.h"
 #include "session/PdfSession.h"
 
 #include <KoDocumentInfo.h>
+
+#include <kis_paint_device.h>
+#include <kis_paint_layer.h>
+
+#include <kis_canvas2.h>
+#include <kis_coordinates_converter.h>
 
 #include <KisDocument.h>
 #include <KisMainWindow.h>
@@ -42,6 +53,21 @@ void say(const QString &message)
     qWarning("[pdfio] %s", qPrintable(message));
 }
 
+/// How far past a page edge the view has to be panned before the page turns, as a fraction of
+/// the viewport. The gesture that reaches the bottom of a page is the same one that would turn it,
+/// so a page has to be left behind by a clear margin before the next one arrives.
+constexpr qreal OverscrollFraction = 0.30;
+
+/// One gesture, one page.
+constexpr qint64 TurnCooldownMs = 700;
+
+/// How long the view has to sit still before the page under it is opened. Long enough that a
+/// gesture in progress never triggers it, short enough not to feel deliberate.
+constexpr qint64 SettleMs = 450;
+
+/// The gap the strip decoration leaves between pages, in widget pixels.
+constexpr qreal GapWidgetPixels = 16;
+
 } // namespace
 
 PdfPageNavigator *PdfPageNavigator::instance()
@@ -59,6 +85,129 @@ QString PdfPageNavigator::projectRoot()
 bool PdfPageNavigator::hasNotebook() const
 {
     return !m_projectDir.isEmpty() && m_manifest.isValid();
+}
+
+bool PdfPageNavigator::scrollFollowEnabled() const
+{
+    return m_scrollFollow;
+}
+
+void PdfPageNavigator::setScrollFollowEnabled(bool enabled)
+{
+    if (m_scrollFollow == enabled) {
+        return;
+    }
+    m_scrollFollow = enabled;
+    say(QStringLiteral("turning pages by panning is now %1").arg(enabled ? "on" : "off"));
+    Q_EMIT pageChanged(m_index, pageCount(), QFileInfo(m_manifest.sourceFile).completeBaseName());
+}
+
+void PdfPageNavigator::checkScrollFollow()
+{
+    if (!m_scrollFollow || !m_view || !m_view->canvasBase() || m_index < 0) {
+        return;
+    }
+
+    KisCanvas2 *canvas = m_view->canvasBase();
+    const KisCoordinatesConverter *converter = canvas->coordinatesConverter();
+    QWidget *widget = canvas->canvasWidget();
+    KisDocument *document = m_document;
+    if (!converter || !widget || !document || !document->image()) {
+        return;
+    }
+
+    const QRectF page = converter->documentToWidget(
+        QRectF(QPointF(0, 0), QSizeF(document->image()->width(), document->image()->height())));
+    if (page.isEmpty()) {
+        return;
+    }
+
+    /// The zoom, read off the page's own on-screen width.
+    const qreal zoom = page.width() / qMax(qreal(1), qreal(document->image()->width()));
+
+    /// Which page the middle of the view is over, in document coordinates.
+    ///
+    /// This replaced a rule that watched how far the page had been panned past its own edge, and
+    /// that rule was wrong. A page that merely sits low in the viewport -- which is what the
+    /// headless canvas does, and what centring can do anywhere -- is indistinguishable, to such a
+    /// rule, from a page pulled down past its top. It then turned pages nobody had scrolled, every
+    /// time the timer fired, until flooding the log was the only thing the application was doing.
+    const QPointF centre = converter->widgetToDocument(QPointF(widget->rect().center()));
+    const int pageUnderCentre = pageAtDocumentPoint(centre, zoom);
+
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+
+    /// Act only once the view has stopped on that page. Turning one costs about 650 ms, measured,
+    /// so it must not happen in the middle of a gesture.
+    if (pageUnderCentre != m_candidatePage) {
+        m_candidatePage = pageUnderCentre;
+        m_candidateSince = now;
+        return;
+    }
+
+    if (pageUnderCentre < 0 || pageUnderCentre == m_index) {
+        return;
+    }
+
+    if (now - m_candidateSince < SettleMs || now - m_lastTurn < TurnCooldownMs) {
+        return;
+    }
+
+    m_lastTurn = now;
+    m_candidatePage = -1;
+
+    QString why;
+    if (!showPage(pageUnderCentre, &why)) {
+        say(QStringLiteral("scroll: could not open page %1 (%2)").arg(pageUnderCentre + 1).arg(why));
+    }
+}
+
+KisView *PdfPageNavigator::currentView() const
+{
+    return m_view;
+}
+
+int PdfPageNavigator::pageAtDocumentPoint(const QPointF &point, qreal zoom) const
+{
+    if (m_index < 0 || m_index >= m_manifest.pages.size() || !m_document || !m_document->image()) {
+        return -1;
+    }
+
+    const QSizeF page(m_document->image()->width(), m_document->image()->height());
+    const QRectF pageRect(0, 0, page.width(), page.height());
+    if (pageRect.contains(point)) {
+        return m_index;
+    }
+
+    /// The open page's own scale: the manifest speaks in points and the image in pixels.
+    const qreal pageWidthPt = m_manifest.pages.at(m_index).sizePt.width();
+    const qreal pixelsPerPoint = pageWidthPt > 0 ? page.width() / pageWidthPt : 1.0;
+
+    /// The same arrangement the strip decoration draws: the neighbours directly above and below,
+    /// each at its own size, separated by the gap.
+    const qreal gap = GapWidgetPixels / qMax(qreal(0.0001), zoom);
+
+    for (int direction : { -1, 1 }) {
+        const int other = m_index + direction;
+        if (other < 0 || other >= m_manifest.pages.size()) {
+            continue;
+        }
+
+        const QSizeF neighbour = m_manifest.pages.at(other).sizePt * pixelsPerPoint;
+        const qreal top = direction > 0 ? pageRect.bottom() + gap
+                                        : pageRect.top() - gap - neighbour.height();
+
+        if (QRectF(pageRect.left(), top, neighbour.width(), neighbour.height()).contains(point)) {
+            return other;
+        }
+    }
+
+    return -1;
+}
+
+KisDocument *PdfPageNavigator::currentDocument() const
+{
+    return m_document;
 }
 
 const PdfSessionManifest &PdfPageNavigator::manifest() const
@@ -131,6 +280,16 @@ bool PdfPageNavigator::openNotebook(const QString &pdfPath, QString *why)
     m_manifest = manifest;
     const bool shown = showPage(0, why);
     Q_EMIT pageChanged(m_index, pageCount(), base);
+
+    /// Watched on a timer rather than from the canvas: panning arrives as wheel or touch events
+    /// depending on the device, and where the page ended up afterwards is the same question either
+    /// way.
+    if (!m_scrollWatch) {
+        m_scrollWatch = new QTimer(this);
+        connect(m_scrollWatch, &QTimer::timeout, this, &PdfPageNavigator::checkScrollFollow);
+    }
+    m_scrollWatch->start(150);
+
     return shown;
 }
 
@@ -181,6 +340,19 @@ bool PdfPageNavigator::showPage(int index, QString *why)
     }
     say(QStringLiteral("rendered %1x%2 at %3 dpi").arg(image->width()).arg(image->height()).arg(image->xRes()));
 
+    /// Whatever was already drawn on this page is put back before it is shown. Saving alone is not
+    /// enough: a page rebuilt from the source comes back with an untouched Ink layer, so without
+    /// this step ink that was written is invisible the moment the page is left and returned to.
+    const QString kraPath = QDir(m_projectDir).filePath(m_manifest.pages.at(index).kraFile);
+    const QImage savedInk = PdfInkLoader::loadInk(kraPath, nullptr);
+    if (!savedInk.isNull()) {
+        if (KisPaintLayer *stroke = qobject_cast<KisPaintLayer *>(PdfProjectBuilder::inkStrokeLayer(image).data())) {
+            stroke->paintDevice()->convertFromQImage(savedInk, 0, 0, 0);
+            say(QStringLiteral("restored %1x%2 of ink from %3")
+                    .arg(savedInk.width()).arg(savedInk.height()).arg(kraPath));
+        }
+    }
+
     KisDocument *document = KisPart::instance()->createDocument();
     document->documentInfo()->setAboutInfo(QStringLiteral("title"),
                                            QFileInfo(m_manifest.sourceFile).completeBaseName());
@@ -196,6 +368,14 @@ bool PdfPageNavigator::showPage(int index, QString *why)
     say(QStringLiteral("main window %1").arg(window ? "found" : "MISSING"));
     KisView *view = window ? window->addViewAndNotifyLoadingCompleted(document) : nullptr;
     say(QStringLiteral("view %1").arg(view ? "created" : "NOT created"));
+
+    /// The neighbouring pages are shown by the view that has just been created, not by whichever
+    /// one this code happens to be running in.
+    if (view && view->canvasBase()
+        && !view->canvasBase()->decoration(QStringLiteral("pdfioPageStrip"))) {
+        view->canvasBase()->addDecoration(
+            KisCanvasDecorationSP(new PdfPageStripDecoration(QStringLiteral("pdfioPageStrip"), view)));
+    }
 
     /// Only now, with the new page up, is the old one given back. Closing first would take the
     /// view that is running this very code with it.
@@ -215,11 +395,20 @@ bool PdfPageNavigator::showPage(int index, QString *why)
     m_view = view;
     m_index = index;
 
-    if (previousView) {
-        previousView->closeView();
-    }
-    if (previousDocument) {
-        KisPart::instance()->removeDocument(previousDocument, true);
+    /// Closed on the next turn of the event loop rather than right here. Closing a view and
+    /// removing its document re-enters the window layout, and doing that inside the call that is
+    /// opening the next page hung: the probe stopped after the first turn and had to be killed.
+    if (previousView || previousDocument) {
+        const QPointer<KisView> doomedView = previousView;
+        const QPointer<KisDocument> doomedDocument = previousDocument;
+        QTimer::singleShot(0, this, [doomedView, doomedDocument]() {
+            if (doomedView) {
+                doomedView->closeView();
+            }
+            if (doomedDocument) {
+                KisPart::instance()->removeDocument(doomedDocument, true);
+            }
+        });
     }
 
     say(QStringLiteral("page %1 of %2 open").arg(index + 1).arg(m_manifest.pages.size()));
@@ -232,6 +421,19 @@ bool PdfPageNavigator::saveCurrentPage(QString *why)
     if (!m_document || !m_document->image() || m_index < 0 || m_index >= m_manifest.pages.size()) {
         /// Nothing open is not a failure; it only means there is nothing to write.
         return true;
+    }
+
+    /// A thumbnail of the page as it looks, ink included, so the docker can show what each page
+    /// holds without opening it. A thumbnail is a scaled copy, not a document, which is the whole
+    /// reason this is affordable and rendering neighbouring pages is not.
+    const QDir project(m_projectDir);
+    const QString thumbPath = project.filePath(m_manifest.pages.at(m_index).thumbFile);
+    if (KisPaintDeviceSP projection = m_document->image()->projection()) {
+        const QImage thumb = projection->createThumbnail(256, 256);
+        if (!thumb.isNull()) {
+            QDir().mkpath(QFileInfo(thumbPath).absolutePath());
+            thumb.save(thumbPath, "PNG");
+        }
     }
 
     /// The copy is made while the page is still alive, and it owns its own pixels, so the editing
