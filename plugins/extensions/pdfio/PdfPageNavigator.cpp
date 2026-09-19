@@ -460,6 +460,111 @@ bool PdfPageNavigator::buildForStrip(int index, QString *why)
     return showImage(strip.image, strip.activeInkLayer, index, strip.layout, why);
 }
 
+bool PdfPageNavigator::rollToPage(int index, QString *why)
+{
+    if (!m_document || !m_document->image()) {
+        fail(why, QStringLiteral("no strip is open"));
+        return false;
+    }
+
+    const PdfStripLayout target = PdfStripLayout::forWindow(m_manifest, index, m_scope, m_dpi);
+    if (!target.isValid()) {
+        fail(why, QStringLiteral("the new window has no valid layout"));
+        return false;
+    }
+
+    /// Only if the image would come out the same size, which it does whenever every slot is the
+    /// same cell. Otherwise the document really does have to be built again.
+    if (target.imageSize() != QSize(m_document->image()->width(), m_document->image()->height())) {
+        fail(why, QStringLiteral("the new window is a different size"));
+        return false;
+    }
+    if (m_stripPaper.size() != target.slots().size()) {
+        fail(why, QStringLiteral("the strip does not have the slots it should"));
+        return false;
+    }
+
+    QScopedPointer<PdfRenderBackend> backend(PdfRenderBackend::create());
+    if (!backend || !backend->open(sourcePath())) {
+        fail(why, QStringLiteral("the renderer cannot open the source"));
+        return false;
+    }
+
+    const KoColorSpace *colorSpace = m_document->image()->colorSpace();
+    KisPaintLayer *ink = nullptr;
+    for (quint32 i = 0; i < m_document->image()->root()->childCount(); ++i) {
+        KisNodeSP child = m_document->image()->root()->at(i);
+        if (child->name() == QStringLiteral("Ink")) {
+            ink = qobject_cast<KisPaintLayer *>(child.data());
+            break;
+        }
+    }
+
+    const QList<PdfStripLayout::Slot> slots = target.slots();
+    int changed = 0;
+
+    for (int i = 0; i < slots.size(); ++i) {
+        const int oldPage = i < m_stripPages.size() ? m_stripPages.at(i) : -1;
+        const int newPage = slots.at(i).page;
+        if (oldPage == newPage) {
+            continue;
+        }
+        ++changed;
+
+        /// The page leaving is written before its band is cleared: its ink is in the layer this is
+        /// about to wipe.
+        if (oldPage >= 0) {
+            savePage(oldPage, nullptr);
+        }
+
+        /// The whole band, because the page arriving may be smaller than the one that was there.
+        if (ink) {
+            ink->paintDevice()->fill(slots.at(i).cell,
+                                     KoColor(Qt::transparent, m_document->image()->colorSpace()));
+        }
+
+        /// const_cast because KisSharedPtr::data() hands back a const node, and the paper layer is
+        /// this code's to repaint.
+        KisPaintLayer *paper = qobject_cast<KisPaintLayer *>(
+            const_cast<KisNode *>(m_stripPaper.at(i).data()));
+        if (paper) {
+            /// The desk colour for the room around the page, then the page itself.
+            paper->paintDevice()->fill(slots.at(i).cell,
+                                       KoColor(QColor(96, 96, 96), m_document->image()->colorSpace()));
+        }
+
+        if (newPage < 0) {
+            continue;
+        }
+
+        const QImage rendered = backend->renderPage(newPage, m_dpi);
+        if (paper && !rendered.isNull()) {
+            paper->paintDevice()->convertFromQImage(rendered, nullptr,
+                                                    slots.at(i).rect.x(), slots.at(i).rect.y());
+            paper->setName(PdfStripBuilder::backgroundLayerName(newPage));
+        }
+
+        const QImage savedInk = PdfInkLoader::loadInk(
+            QDir(m_projectDir).filePath(m_manifest.pages.at(newPage).kraFile), nullptr);
+        if (ink && !savedInk.isNull()) {
+            ink->paintDevice()->convertFromQImage(savedInk, nullptr,
+                                                  slots.at(i).rect.x(), slots.at(i).rect.y());
+        }
+    }
+
+    Q_UNUSED(colorSpace);
+
+    m_stripPages.clear();
+    m_stripRects.clear();
+    for (const PdfStripLayout::Slot &slot : slots) {
+        m_stripPages.append(slot.page);
+        m_stripRects.append(slot.rect);
+    }
+
+    say(QStringLiteral("strip: rolled the window, repainting %1 slot(s)").arg(changed));
+    return activateWithinStrip(index, why);
+}
+
 bool PdfPageNavigator::activateWithinStrip(int index, QString *why)
 {
     if (m_stripPages.isEmpty() || !m_document || !m_document->image()) {
@@ -541,6 +646,15 @@ bool PdfPageNavigator::showPage(int index, QString *why)
     /// the 650 ms a page turn costs is almost all document and view, measured on the tablet.
     if (m_document && m_stripPages.contains(index)) {
         return activateWithinStrip(index, why);
+    }
+
+    /// A page one step outside it needs the window moved, not rebuilt.
+    if (m_document && !m_stripPages.isEmpty()) {
+        QString rollError;
+        if (rollToPage(index, &rollError)) {
+            return true;
+        }
+        say(QStringLiteral("strip: rolling was not possible (%1); building instead").arg(rollError));
     }
 
     return m_scope > 1 ? buildForStrip(index, why) : buildForSinglePage(index, why);
@@ -698,6 +812,15 @@ bool PdfPageNavigator::showImage(KisImageSP image, KisNodeSP activeNode, int ind
         m_stripRects.append(slot.rect);
     }
     m_stripActiveSlot = layout.isValid() ? layout.activeSlot() : -1;
+
+    /// The paper of each slot, in slot order, so the rolling window can repaint one of them.
+    m_stripPaper.clear();
+    for (quint32 i = 0; i < image->root()->childCount(); ++i) {
+        const QString name = image->root()->at(i)->name();
+        if (name != QStringLiteral("Desk") && name != QStringLiteral("Ink")) {
+            m_stripPaper.append(image->root()->at(i));
+        }
+    }
 
     /// Closed on the next turn of the event loop rather than right here. Closing a view and
     /// removing its document re-enters the window layout, and doing that inside the call that is

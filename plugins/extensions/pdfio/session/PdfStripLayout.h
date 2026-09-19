@@ -36,6 +36,10 @@ public:
         int page = -1;
         /// Where the page sits in the strip image, in pixels.
         QRect rect;
+
+        /// The whole band this slot owns, page or no page. Clearing a slot means clearing this,
+        /// because the page that was there may have been larger than the one arriving.
+        QRect cell;
     };
 
     PdfStripLayout() = default;

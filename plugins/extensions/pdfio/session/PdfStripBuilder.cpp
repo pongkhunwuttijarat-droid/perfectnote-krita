@@ -122,6 +122,7 @@ PdfStripBuilder::Strip PdfStripBuilder::build(const PdfSessionManifest &manifest
         }
         background->setUserLocked(true);
         strip.image->addNode(background, strip.image->root());
+        strip.paperLayers.append(background);
     }
 
     /// One ink layer for the whole strip, above all of the paper.

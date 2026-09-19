@@ -30,6 +30,10 @@ class PdfStripBuilder
 public:
     struct Strip {
         KisImageSP image;
+
+        /// The paper layer of each slot, in slot order. Held so that rolling the window can
+        /// repaint the one slot that changes without building the strip again.
+        QList<KisNodeSP> paperLayers;
         /// The paint layer inside the active slot's Ink group, to be the active node.
         KisNodeSP activeInkLayer;
         PdfStripLayout layout;

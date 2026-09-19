@@ -85,6 +85,7 @@ PdfStripLayout PdfStripLayout::forWindow(const PdfSessionManifest &manifest,
         const int x = (cell.width() - pageSize.width()) / 2;
         const int y = i * (cell.height() + SlotGap) + (cell.height() - pageSize.height()) / 2;
         slot.rect = QRect(x, y, pageSize.width(), pageSize.height());
+        slot.cell = QRect(0, i * (cell.height() + SlotGap), cell.width(), cell.height());
 
         if (slot.page == activePage) {
             layout.m_activeSlot = i;

@@ -157,16 +157,25 @@ private:
     /// page and not of the strip, and turning between pages already in the strip builds nothing.
     /// One was the safe answer while the cropping was unproven, because saving a strip without
     /// cropping writes several pages into one page's ink, quietly.
-    /// Five, so that turning through a run of pages stays inside one strip and the window does not
-    /// have to be rebuilt every other turn -- which is what made page turns look like jumps of the
-    /// whole window rather than a move to the next page.
-    int m_scope = 5;
+    /// Three: the page being written on, one above it and one below.
+    ///
+    /// It was five, to keep a run of turns inside one strip. Five also means the pages two away
+    /// stay in the document, and the page a long way back is still there to scroll to, which is not
+    /// what a notebook should show -- one above and one below is what was asked for.
+    ///
+    /// The price is that the window is rebuilt every other turn, because rolling it -- repainting
+    /// the one slot that goes out instead of building a new strip -- is not written yet. That is
+    /// the piece that will make a run of turns continuous.
+    int m_scope = 3;
     qreal m_dpi = 200.0;
 
     /// The pages the open strip holds and where each sits. Empty when the document is a single
     /// page, which is also how the code tells the two apart.
     QList<int> m_stripPages;
     QList<QRect> m_stripRects;
+
+    /// The paper layer of each slot, in slot order, for repainting one of them.
+    QList<KisNodeSP> m_stripPaper;
     int m_stripActiveSlot = -1;
 
     void makeOneThumbnail();
@@ -181,6 +190,15 @@ private:
      */
     bool buildForSinglePage(int index, QString *why);
     bool buildForStrip(int index, QString *why);
+
+    /**
+     * Moves the window one page without building anything.
+     *
+     * The image is the same size for any window, because every slot is the same cell, so reaching
+     * a page that is not in the strip only means repainting the slots whose page changed. That is
+     * what makes a run of page turns continuous instead of a rebuild every other turn.
+     */
+    bool rollToPage(int index, QString *why);
     bool activateWithinStrip(int index, QString *why);
 
     /// Creates the document, its view and the strip decoration, and gives the page that was open
