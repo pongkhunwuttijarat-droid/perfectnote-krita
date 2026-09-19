@@ -96,8 +96,8 @@ void PdfStripLayoutTest::testSlotsHoldWholePages()
 
         /// The slot's rect is the page at its own size, inside the strip.
         const PdfPageRecord &page = manifest().pages.at(slot.page);
-        QCOMPARE(slot.rect.width(), qCeil(page.sizePt.width() * 200.0 / 72.0));
-        QCOMPARE(slot.rect.height(), qCeil(page.sizePt.height() * 200.0 / 72.0));
+        QCOMPARE(slot.rect.width(), qRound(page.sizePt.width() * 200.0 / 72.0));
+        QCOMPARE(slot.rect.height(), qRound(page.sizePt.height() * 200.0 / 72.0));
 
         /// And it is inside the image.
         QVERIFY(QRect(QPoint(0, 0), layout.imageSize()).contains(slot.rect));

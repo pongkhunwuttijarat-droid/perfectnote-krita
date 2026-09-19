@@ -372,13 +372,13 @@ bool PdfPageNavigator::openNotebook(const QString &pdfPath, QString *why)
 
 void PdfPageNavigator::closeCurrentPage()
 {
-    /// The view first: a view outlives its document otherwise, and the point of this is to give
-    /// the memory back.
+    /// The view takes the document with it, and removing the document as well leaves the view
+    /// alive with nothing behind it. See the note in showPage.
     if (m_view) {
         m_view->closeView();
         m_view = nullptr;
-    }
-    if (m_document) {
+        m_document = nullptr;
+    } else if (m_document) {
         KisPart::instance()->removeDocument(m_document, true);
         m_document = nullptr;
     }
@@ -478,11 +478,17 @@ bool PdfPageNavigator::showPage(int index, QString *why)
     if (previousView || previousDocument) {
         const QPointer<KisView> doomedView = previousView;
         const QPointer<KisDocument> doomedDocument = previousDocument;
+
         QTimer::singleShot(0, this, [doomedView, doomedDocument]() {
             if (doomedView) {
+                /// The view takes the document with it: Krita closes a document when its last view
+                /// goes. Removing the document as well was a double teardown, and it crashed --
+                /// the document died while the view lived on, and a queued signal compressor then
+                /// called slotUpdateDocumentTitle on that view, which reached KisDocument::path
+                /// through a null document.
                 doomedView->closeView();
-            }
-            if (doomedDocument) {
+            } else if (doomedDocument) {
+                /// No view was ever made for it, so nobody else will close it.
                 KisPart::instance()->removeDocument(doomedDocument, true);
             }
         });

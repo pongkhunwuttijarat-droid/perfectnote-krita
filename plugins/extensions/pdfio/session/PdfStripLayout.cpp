@@ -20,8 +20,11 @@ QSize pageSizeInPixels(const PdfSessionManifest &manifest, const PdfPageRecord &
     if (!page.sizePt.isValid()) {
         return QSize();
     }
-    return QSize(qCeil(page.sizePt.width() * dpi / 72.0),
-                 qCeil(page.sizePt.height() * dpi / 72.0));
+    /// Rounded, not ceilinged, because that is what the renderers actually produce: a 300 point
+    /// page at 200 dpi comes back as 833 pixels, not 834. Deriving a raster size from pt/72*dpi
+    /// instead of asking the renderer is the mistake this project already made once.
+    return QSize(qRound(page.sizePt.width() * dpi / 72.0),
+                 qRound(page.sizePt.height() * dpi / 72.0));
 }
 
 } // namespace
