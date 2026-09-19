@@ -350,6 +350,7 @@ set(kritaui_LIB_SRCS
     input/KisCanvasNavigationActionStrategyTouch.cpp
     input/KisInputEventsEater.cpp
     input/kis_input_manager.cpp
+    input/KisStylusRotationProvider.cpp
     input/kis_input_manager_p.cpp
     input/kis_extended_modifiers_mapper.cpp
     input/KisExtendedModifiersMapperPluginInterface.cpp

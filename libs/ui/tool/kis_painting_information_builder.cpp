@@ -14,6 +14,8 @@
 #include "kis_cubic_curve.h"
 #include "kis_speed_smoother.h"
 
+#include <input/KisStylusRotationProvider.h>
+
 #include <KoCanvasResourceProvider.h>
 #include "kis_canvas_resource_provider.h"
 
@@ -130,7 +132,7 @@ KisPaintInformation KisPaintingInformationBuilder::createPaintingInformation(KoP
     KisPaintInformation pi(imagePoint,
                            !m_pressureDisabled ? 1.0 : pressureToCurve(event->pressure()),
                            event->xTilt(), event->yTilt(),
-                           event->rotation(),
+                           KisStylusRotationProvider::rotationFor(event),
                            event->tangentialPressure(),
                            perspective,
                            timeElapsed,
@@ -158,7 +160,7 @@ KisPaintInformation KisPaintingInformationBuilder::hover(const QPointF &imagePoi
         return KisPaintInformation::createHoveringModeInfo(imagePoint,
                                                            PRESSURE_DEFAULT,
                                                            event->xTilt(), event->yTilt(),
-                                                           event->rotation(),
+                                                           KisStylusRotationProvider::rotationFor(event),
                                                            event->tangentialPressure(),
                                                            perspective,
                                                            qMin(1.0, speed / qreal(m_maxAllowedSpeedValue)),
