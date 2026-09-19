@@ -22,6 +22,8 @@
 #include <kis_canvas_controller.h>
 #include <kis_popup_palette.h>
 
+#include <input/KisStylusRotationProvider.h>
+
 
 K_PLUGIN_FACTORY_WITH_JSON(PenSettingsFactory, "kritapensettings.json", registerPlugin<PenSettings>();)
 
@@ -82,6 +84,9 @@ void PenSettings::slotLoadSettings()
     m_actionMap.insert(Gesture::DoubleTap, cfg.readEntry("actionDoubleTap", QString::fromLatin1(PenSettingsDefaults::DoubleTap)));
     m_actionMap.insert(Gesture::SlideUp, cfg.readEntry("actionSlideUp", QString::fromLatin1(PenSettingsDefaults::SlideUp)));
     m_actionMap.insert(Gesture::SlideDown, cfg.readEntry("actionSlideDown", QString::fromLatin1(PenSettingsDefaults::SlideDown)));
+
+    KisStylusRotationProvider::setOverridesBrushAngle(cfg.readEntry("rotationDrivesAngle", false));
+    KisStylusRotationProvider::setInverted(cfg.readEntry("rotationInverted", false));
 }
 
 void PenSettings::slotTriggerPopupPalette()

@@ -6,10 +6,13 @@
  */
 #include "KisRotationOption.h"
 
+#include <kis_algebra_2d.h>
 #include <kis_properties_configuration.h>
 #include <kis_paint_information.h>
 #include <KisStandardOptionData.h>
 #include <kis_paintop.h>
+
+#include <input/KisStylusRotationProvider.h>
 
 #include <KisPaintOpOptionUtils.h>
 namespace kpou = KisPaintOpOptionUtils;
@@ -33,6 +36,26 @@ KisRotationOption::KisRotationOption(const KisRotationOptionData &data)
 
 qreal KisRotationOption::apply(const KisPaintInformation & info) const
 {
+    /**
+     * A pen that reports its own barrel rotation can drive the dab angle of every preset
+     * at once, including the presets that do not drive their Rotation parameter from the
+     * Rotation sensor. Nothing is written to the presets, so switching this off restores
+     * the stock behaviour exactly; the switch lives in the Pen preferences page.
+     */
+    if (KisStylusRotationProvider::overridesBrushAngle() &&
+        KisStylusRotationProvider::isSupported()) {
+
+        const qreal normalizedBaseAngle = -info.canvasRotation() / 360.0;
+        const qreal penAngle = KisStylusRotationProvider::rotation() / 180.0;
+
+        // Same shape as computeRotationLikeValue() below, with the pen angle standing in
+        // for the sensor, so that the canvas rotation keeps being folded in.
+        qreal value = KisAlgebra2D::wrapValue(2.0 * normalizedBaseAngle + penAngle, -1.0, 1.0);
+        value = 1.0 - value;
+
+        return normalizeAngle(value * M_PI);
+    }
+
     if (!isChecked()) return kisDegreesToRadians(info.canvasRotation());
 
     const bool absoluteAxesFlipped = info.canvasMirroredH() != info.canvasMirroredV();

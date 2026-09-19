@@ -96,6 +96,9 @@ void KisPenSettings::savePreferences() const
     cfg.writeEntry("actionSlideUp", actionNameForIndex(mUi->cmbSlideUpAction->currentIndex()));
     cfg.writeEntry("actionSlideDown", actionNameForIndex(mUi->cmbSlideDownAction->currentIndex()));
 
+    cfg.writeEntry("rotationDrivesAngle", mUi->chkRotationOverride->isChecked());
+    cfg.writeEntry("rotationInverted", mUi->chkRotationInverted->isChecked());
+
     Q_EMIT settingsChanged();
 }
 
@@ -107,6 +110,9 @@ void KisPenSettings::loadPreferences()
     mUi->cmbDoubleTapAction->setCurrentIndex(indexFromActionName(cfg.readEntry("actionDoubleTap", QString::fromLatin1(PenSettingsDefaults::DoubleTap))));
     mUi->cmbSlideUpAction->setCurrentIndex(indexFromActionName(cfg.readEntry("actionSlideUp", QString::fromLatin1(PenSettingsDefaults::SlideUp))));
     mUi->cmbSlideDownAction->setCurrentIndex(indexFromActionName(cfg.readEntry("actionSlideDown", QString::fromLatin1(PenSettingsDefaults::SlideDown))));
+
+    mUi->chkRotationOverride->setChecked(cfg.readEntry("rotationDrivesAngle", false));
+    mUi->chkRotationInverted->setChecked(cfg.readEntry("rotationInverted", false));
 }
 
 void KisPenSettings::loadDefaultPreferences()
@@ -115,6 +121,9 @@ void KisPenSettings::loadDefaultPreferences()
     mUi->cmbDoubleTapAction->setCurrentIndex(indexFromActionName(QString::fromLatin1(PenSettingsDefaults::DoubleTap)));
     mUi->cmbSlideUpAction->setCurrentIndex(indexFromActionName(QString::fromLatin1(PenSettingsDefaults::SlideUp)));
     mUi->cmbSlideDownAction->setCurrentIndex(indexFromActionName(QString::fromLatin1(PenSettingsDefaults::SlideDown)));
+
+    mUi->chkRotationOverride->setChecked(false);
+    mUi->chkRotationInverted->setChecked(false);
 }
 
 QString KisPenSettings::actionNameForIndex(int index) const

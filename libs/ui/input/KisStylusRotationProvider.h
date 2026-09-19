@@ -49,6 +49,25 @@ KRITAUI_EXPORT qreal rotation();
  */
 KRITAUI_EXPORT qreal rotationFor(const KoPointerEvent *event);
 
+/**
+ * When true, paint ops take the dab angle straight from the pen instead of from their
+ * own Rotation option.
+ *
+ * Every brush preset can already opt in by driving its Rotation parameter from the
+ * Rotation sensor; this switch is for the presets that do not, so that one toggle in the
+ * preferences makes the whole brush set follow the pen. It is off by default and never
+ * rewrites a preset: turn it off and Krita behaves exactly as upstream again.
+ */
+KRITAUI_EXPORT void setOverridesBrushAngle(bool value);
+KRITAUI_EXPORT bool overridesBrushAngle();
+
+/**
+ * Flip the sign of the reported rotation, for pens that report it the other way round.
+ * Applies to both paths, so there is one place to fix the direction.
+ */
+KRITAUI_EXPORT void setInverted(bool value);
+KRITAUI_EXPORT bool inverted();
+
 } // namespace KisStylusRotationProvider
 
 #endif // KISSTYLUSROTATIONPROVIDER_H

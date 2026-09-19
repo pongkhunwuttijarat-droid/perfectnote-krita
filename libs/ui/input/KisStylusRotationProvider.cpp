@@ -34,6 +34,18 @@ bool &hasValue()
     return value;
 }
 
+bool &overridesBrushAngleFlag()
+{
+    static bool value = false;
+    return value;
+}
+
+bool &invertedFlag()
+{
+    static bool value = false;
+    return value;
+}
+
 } // namespace
 
 void setRotation(qreal degrees)
@@ -74,9 +86,29 @@ bool isSupported()
     return hasValue();
 }
 
+void setOverridesBrushAngle(bool value)
+{
+    overridesBrushAngleFlag() = value;
+}
+
+bool overridesBrushAngle()
+{
+    return overridesBrushAngleFlag();
+}
+
+void setInverted(bool value)
+{
+    invertedFlag() = value;
+}
+
+bool inverted()
+{
+    return invertedFlag();
+}
+
 qreal rotation()
 {
-    return storedRotation();
+    return invertedFlag() ? -storedRotation() : storedRotation();
 }
 
 qreal rotationFor(const KoPointerEvent *event)

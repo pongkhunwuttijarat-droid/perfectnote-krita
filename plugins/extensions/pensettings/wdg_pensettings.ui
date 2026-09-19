@@ -95,10 +95,24 @@
       <item>
        <widget class="QLabel" name="labelRotation">
         <property name="text">
-         <string>Barrel rotation is not an action: it is delivered to the brush engine as the &quot;Rotation&quot; sensor, so it is enabled per brush preset in the Brush Editor (F5).</string>
+         <string>A brush follows the pen when its Rotation parameter is driven by the &quot;Rotation&quot; sensor, which is set per preset in the Brush Editor (F5). The switch below does the same for every preset at once, without changing any of them.</string>
         </property>
         <property name="wordWrap">
          <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QCheckBox" name="chkRotationOverride">
+        <property name="text">
+         <string>Use the pen rotation for every brush preset</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QCheckBox" name="chkRotationInverted">
+        <property name="text">
+         <string>Invert the rotation direction</string>
         </property>
        </widget>
       </item>
