@@ -4,6 +4,8 @@
  *  SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#include "AndroidDocumentPicker.h"
+#include "PdfIoDocker.h"
 #include "PdfIoPlugin.h"
 #include "PdfIoProbe.h"
 #include "PdfPageNavigator.h"
@@ -70,6 +72,9 @@ PdfIoPlugin::PdfIoPlugin(QObject *parent, const QVariantList &)
 {
     registerActions();
 
+    /// Once per process: a view plugin is created for every view.
+    registerPdfIoDocker();
+
     /// Temporary: answers whether the Android render backend can be pure C++.
     PdfRendererSpike::run();
 
@@ -101,6 +106,12 @@ PdfIoPlugin::PdfIoPlugin(QObject *parent, const QVariantList &)
     /// toolbar handler are not ready. The real action is triggered long after startup, so queueing
     /// the probe the same way is both the fix and a faithful stand-in.
     QTimer::singleShot(0, this, [this, probePath]() {
+#if defined(Q_OS_ANDROID)
+        /// Temporary: on Android the picker is the only way to reach a file the user owns, so the
+        /// probe opens it and the result is what gets verified.
+        slotOpenNotebook();
+        return;
+#endif
         const int scale = qEnvironmentVariableIntValue("PDFIO_PROBE_SCALE");
         if (scale > 0) {
             runScaleProbe(scale);
@@ -159,6 +170,31 @@ void PdfIoPlugin::registerActions()
 
 void PdfIoPlugin::slotOpenNotebook()
 {
+#if defined(Q_OS_ANDROID)
+    /// QFileDialog is not usable here: the application has no broad filesystem access, so the
+    /// file arrives as a content URI and has to be copied to a path the renderer can open.
+    auto *picker = new AndroidDocumentPicker(this);
+    say(QStringLiteral("the document picker is opening"));
+    picker->pickPdf([this, picker](const QString &localPath, const QString &why) {
+        picker->deleteLater();
+        say(QStringLiteral("picker finished: path \"%1\" reason \"%2\"").arg(localPath, why));
+
+        if (localPath.isEmpty()) {
+            say(QStringLiteral("nothing was opened: %1").arg(why));
+            return;
+        }
+
+        /// Deferred out of the activity result callback. Opening a document builds a view and
+        /// walks the resource system, and doing that while the activity transition is still
+        /// unwinding crashed inside Qt's own hash tables.
+        QTimer::singleShot(0, this, [this, localPath]() {
+            QString error;
+            if (!PdfPageNavigator::instance()->openNotebook(localPath, &error)) {
+                say(QStringLiteral("could not open the chosen file: %1").arg(error));
+            }
+        });
+    });
+#else
     const QString path = QFileDialog::getOpenFileName(nullptr,
                                                       i18n("Open PDF as notebook"),
                                                       QString(),
@@ -170,6 +206,7 @@ void PdfIoPlugin::slotOpenNotebook()
     if (!PdfPageNavigator::instance()->openNotebook(path, nullptr)) {
         qWarning() << "pdfio could not open" << path;
     }
+#endif
 }
 
 void PdfIoPlugin::slotNextPage()

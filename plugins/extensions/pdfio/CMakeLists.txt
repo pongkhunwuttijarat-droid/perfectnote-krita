@@ -1,4 +1,5 @@
 set(kritapdfio_SOURCES
+    PdfIoDocker.cpp
     PdfIoPlugin.cpp
     PdfIoProbe.cpp
     PdfPageNavigator.cpp
@@ -19,7 +20,7 @@ target_include_directories(kritapdfio PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 # has no Poppler at all and will reach android.graphics.pdf.PdfRenderer through QJniObject.
 # Everything above PdfRenderBackend is platform neutral, which is the point of the split.
 target_include_directories(kritapdfio PRIVATE ${CMAKE_SOURCE_DIR}/plugins/impex/libkra)
-target_link_libraries(kritapdfio PRIVATE kritaimage kritalibkra)
+target_link_libraries(kritapdfio PRIVATE kritaimage kritalibkra kritawidgetutils)
 
 if (Poppler_Qt${QT_MAJOR_VERSION}_FOUND)
     target_sources(kritapdfio PRIVATE backends/poppler/PopplerRenderBackend.cpp)
@@ -30,7 +31,9 @@ endif()
 if (ANDROID)
     # android.graphics.pdf.PdfRenderer is a framework class, so it is reached straight from C++
     # and no Java of ours has to be added to the APK.
-    target_sources(kritapdfio PRIVATE backends/android/AndroidRenderBackend.cpp)
+    target_sources(kritapdfio PRIVATE
+        AndroidDocumentPicker.cpp
+        backends/android/AndroidRenderBackend.cpp)
 endif()
 
 if (ANDROID)

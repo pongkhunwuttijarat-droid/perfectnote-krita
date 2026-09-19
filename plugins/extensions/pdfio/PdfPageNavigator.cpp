@@ -113,7 +113,9 @@ bool PdfPageNavigator::openNotebook(const QString &pdfPath, QString *why)
 
     m_projectDir = projectDir;
     m_manifest = manifest;
-    return showPage(0, why);
+    const bool shown = showPage(0, why);
+    Q_EMIT pageChanged(m_index, pageCount(), base);
+    return shown;
 }
 
 void PdfPageNavigator::closeCurrentPage()
@@ -186,6 +188,7 @@ bool PdfPageNavigator::showPage(int index, QString *why)
     }
 
     say(QStringLiteral("page %1 of %2 open").arg(index + 1).arg(m_manifest.pages.size()));
+    Q_EMIT pageChanged(m_index, pageCount(), QFileInfo(m_manifest.sourceFile).completeBaseName());
     return true;
 }
 

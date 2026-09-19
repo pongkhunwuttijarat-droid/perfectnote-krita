@@ -1,0 +1,45 @@
+/*
+ *  SPDX-FileCopyrightText: 2026 PerfectNote contributors
+ *
+ *  SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+#ifndef PDFIODOCKER_H
+#define PDFIODOCKER_H
+
+#include <QDockWidget>
+
+class QLabel;
+class QListWidget;
+class QPushButton;
+
+/**
+ * The page strip of a notebook.
+ *
+ * One page is one document, so there is no page control in Krita to reuse: this is the thing
+ * that turns pages. The list is filled from the open notebook and the entries are cheap labels
+ * rather than thumbnails, because painting one thumbnail per page would cost exactly what the
+ * bounded set exists to avoid.
+ */
+class PdfIoDocker : public QDockWidget
+{
+    Q_OBJECT
+public:
+    PdfIoDocker();
+    ~PdfIoDocker() override;
+
+private Q_SLOTS:
+    void refresh(int index, int pageCount, const QString &label);
+    void openSelected();
+
+private:
+    QLabel *m_status = nullptr;
+    QListWidget *m_pages = nullptr;
+    QPushButton *m_previous = nullptr;
+    QPushButton *m_next = nullptr;
+};
+
+/// Registers the docker once per process; a view plugin is created per view.
+void registerPdfIoDocker();
+
+#endif // PDFIODOCKER_H

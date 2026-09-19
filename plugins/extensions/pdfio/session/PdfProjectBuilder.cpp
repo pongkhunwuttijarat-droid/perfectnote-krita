@@ -6,6 +6,10 @@
 
 #include "PdfProjectBuilder.h"
 
+#include <cmath>
+
+#include <QDebug>
+
 #include "backend/PdfRenderBackend.h"
 
 #include <QImage>
@@ -66,6 +70,20 @@ KisImageSP PdfProjectBuilder::buildPageImage(const PdfPageRecord &page,
     if (!page.sizePt.isValid()) {
         fail(why, QStringLiteral("page %1 has no usable geometry").arg(page.index + 1));
         return KisImageSP();
+    }
+
+    /// A page scanned at 300 dpi is seventeen megapixels, and every one of them costs four bytes
+    /// three times over: the bitmap the renderer fills, the QImage it is read into, and the layer
+    /// it is converted into. That is how a tablet runs out of memory, and it is what happened on
+    /// the first real document this was tried on. The resolution is reduced to fit a budget.
+    constexpr qint64 MaxPagePixels = 8 * 1000 * 1000;
+    const qreal wantedPixels =
+        (page.sizePt.width() * dpi / 72.0) * (page.sizePt.height() * dpi / 72.0);
+    if (wantedPixels > MaxPagePixels) {
+        const qreal requestedDpi = dpi;
+        dpi *= std::sqrt(qreal(MaxPagePixels) / wantedPixels);
+        qWarning() << "[pdfio] page" << (page.index + 1) << "wants" << qint64(wantedPixels)
+                   << "pixels; rendering at" << dpi << "instead of" << requestedDpi;
     }
 
     const QImage rendered = backend.renderPage(page.index, dpi);

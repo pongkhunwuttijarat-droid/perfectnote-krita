@@ -9,6 +9,7 @@
 
 #include "session/PdfSessionManifest.h"
 
+#include <QObject>
 #include <QPointer>
 #include <QString>
 
@@ -26,8 +27,9 @@ class PdfRenderBackend;
  * bounded set: opening a page closes the one before it. The page artwork is not lost by that,
  * because it is rendered again from the bundled source.
  */
-class PdfPageNavigator
+class PdfPageNavigator : public QObject
 {
+    Q_OBJECT
 public:
     static PdfPageNavigator *instance();
 
@@ -42,6 +44,11 @@ public:
     int pageCount() const;
     int currentIndex() const;
     QString projectDir() const;
+
+Q_SIGNALS:
+    /// Emitted whenever the open page or the notebook itself changes, so a navigator widget can
+    /// follow along without polling.
+    void pageChanged(int index, int pageCount, const QString &label);
 
 private:
     PdfPageNavigator() = default;
