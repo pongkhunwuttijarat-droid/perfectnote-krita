@@ -46,6 +46,9 @@ public class MainActivity extends QtActivity {
     // Non-standard key codes reported by vendor stylus hardware for its gestures.
     private static final int STYLUS_GESTURE_KEY_FIRST = 194;
     private static final int STYLUS_GESTURE_KEY_LAST = 197;
+
+    /** Vendor pen service client. Null when the service is unavailable. */
+    private PenEngineClient mPenEngine = null;
     private static boolean applicationLoaded = false;
     private static String applicationLoadingText = "";
     private boolean haveLibsLoaded = false;
@@ -71,6 +74,24 @@ public class MainActivity extends QtActivity {
         SDLAudioManager.nativeSetupJNI();
 
         super.onCreate(savedInstanceState);
+
+        // Start the vendor pen service so the ROM begins delivering barrel rotation and
+        // the sliding / double tap gestures. Safe on devices without the service.
+        mPenEngine = new PenEngineClient(this, new PenEngineClient.Listener() {
+            @Override
+            public void onStylusRotation(int degrees) {
+                JNIWrappers.stylusRotation(degrees);
+            }
+
+            @Override
+            public void onTouchFilm(int code) {
+                // Codes are ROM defined; sliding and double tap are also delivered as
+                // keys, which is the path the gesture actions use.
+                Log.i(TAG, "touch film code=" + code);
+            }
+        });
+        mPenEngine.bind();
+
         Log.i(TAG, "TouchSlop: " + ViewConfiguration.get(this).getScaledTouchSlop());
         Log.i(TAG, "LibsLoaded");
         haveLibsLoaded = true;
@@ -167,6 +188,10 @@ public class MainActivity extends QtActivity {
         // is killed. This means, for us that the service has been stopped.
 
         Log.i(TAG, "[onDestroy]");
+        if (mPenEngine != null) {
+            mPenEngine.unbind();
+            mPenEngine = null;
+        }
         startServiceGeneric(DocumentSaverService.KILL_PROCESS);
 
         super.onDestroy();
@@ -208,6 +233,12 @@ public class MainActivity extends QtActivity {
         // android doesn't send events of type other than SOURCE_CLASS_POINTER
         // to the view which was just tapped. So, this view will never get to
         // QtSurface, because it doesn't claim focus.
+        // The vendor posture stream carries the barrel rotation. Qt does not read the
+        // axis this device populates, so we decode it ourselves and hand it to native.
+        if (mPenEngine != null && mPenEngine.handleMotionEvent(event)) {
+            return true;
+        }
+
         if (event.isFromSource(InputDevice.SOURCE_TOUCHPAD)) {
             return QtNative.getInputEventDispatcher().sendGenericMotionEvent(event, event.getDeviceId());
         }

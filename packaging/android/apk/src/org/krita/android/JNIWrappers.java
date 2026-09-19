@@ -19,5 +19,6 @@ class JNIWrappers {
     public static native void onScalingDialogShown();
     public static native void onScalingDialogDismissed();
     public static native void stylusGestureKey(int keyCode, int action, int repeatCount);
+    public static native void stylusRotation(int degrees);
 }
 
