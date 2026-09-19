@@ -7,6 +7,9 @@
 #ifndef PDFPAGENAVIGATOR_H
 #define PDFPAGENAVIGATOR_H
 
+/// Included rather than forward declared: the navigator holds a QScopedPointer to it, and that
+/// needs the complete type for its destructor.
+#include "backend/PdfRenderBackend.h"
 #include "session/PdfSessionManifest.h"
 
 #include <QObject>
@@ -16,7 +19,6 @@
 
 class KisDocument;
 class KisView;
-class PdfRenderBackend;
 
 /**
  * Which page of which notebook is open, held once per process.
@@ -50,6 +52,15 @@ public:
     KisView *currentView() const;
 
     /**
+     * Makes sure the page has a thumbnail, rendering one at thumbnail resolution when it has none.
+     *
+     * Queueing is cheap and the work happens one page at a time, so a page selector can ask for
+     * every page it shows without the window stalling. Pages that were drawn on already have a
+     * thumbnail, taken from their own projection; this is for the ones that were never opened.
+     */
+    void ensureThumbnail(int index);
+
+    /**
      * Whether panning past the edge of a page turns to the next one.
      *
      * Off is a reasonable choice: the gesture that turns a page is the same one used to look at
@@ -70,6 +81,9 @@ Q_SIGNALS:
     /// Emitted whenever the open page or the notebook itself changes, so a navigator widget can
     /// follow along without polling.
     void pageChanged(int index, int pageCount, const QString &label);
+
+    /// A thumbnail that was missing has been written, so a view showing that page can update.
+    void thumbnailReady(int index);
 
 private:
     PdfPageNavigator() = default;
@@ -106,6 +120,14 @@ private:
     bool m_scrollFollow = true;
     QTimer *m_scrollWatch = nullptr;
 
+    void makeOneThumbnail();
+
+    QList<int> m_thumbnailQueue;
+    QTimer *m_thumbnailTimer = nullptr;
+
+    /// Kept open between thumbnails: parsing the source once is worth more than the thumbnails.
+    QScopedPointer<PdfRenderBackend> m_thumbnailBackend;
+
     /// So one continued gesture does not turn several pages.
     qint64 m_lastTurn = 0;
 
@@ -114,10 +136,7 @@ private:
     int m_candidatePage = -1;
     qint64 m_candidateSince = 0;
 
-    /// The furthest a page has been panned past its own edge, in widget pixels. Reported because
-    /// it decides whether this feature can work at all: if the canvas clamps panning to the page,
-    /// nothing is ever reachable and the threshold never fires.
-    qreal m_maxOvershoot = 0;
+
 };
 
 #endif // PDFPAGENAVIGATOR_H

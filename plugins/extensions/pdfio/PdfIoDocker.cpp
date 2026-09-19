@@ -12,7 +12,9 @@
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
+#include <QListView>
 #include <QPixmap>
+#include <QScrollBar>
 #include <QListWidget>
 #include <QPushButton>
 #include <QVBoxLayout>
@@ -55,6 +57,16 @@ PdfIoDocker::PdfIoDocker()
     layout->addWidget(m_status);
 
     m_pages = new QListWidget(content);
+    /// A wall of pages rather than a column of names: this is the page selector, and the whole
+    /// point of it is recognising a page before opening it.
+    m_pages->setViewMode(QListView::IconMode);
+    m_pages->setIconSize(QSize(128, 128));
+    m_pages->setGridSize(QSize(150, 176));
+    m_pages->setResizeMode(QListView::Adjust);
+    m_pages->setMovement(QListView::Static);
+    m_pages->setWordWrap(true);
+    m_pages->setUniformItemSizes(true);
+    m_pages->setSpacing(4);
     layout->addWidget(m_pages);
 
     auto *buttons = new QHBoxLayout();
@@ -81,6 +93,10 @@ PdfIoDocker::PdfIoDocker()
     /// it instead of keeping a second copy of that state.
     connect(PdfPageNavigator::instance(), &PdfPageNavigator::pageChanged,
             this, &PdfIoDocker::refresh);
+    connect(PdfPageNavigator::instance(), &PdfPageNavigator::thumbnailReady,
+            this, &PdfIoDocker::updateThumbnail);
+    connect(m_pages->verticalScrollBar(), &QScrollBar::valueChanged,
+            this, &PdfIoDocker::queueThumbnails);
 }
 
 PdfIoDocker::~PdfIoDocker() = default;
@@ -100,17 +116,13 @@ void PdfIoDocker::refresh(int index, int pageCount, const QString &label)
         }
     }
 
-    if (index >= 0 && index < pageCount && index < navigator->manifest().pages.size()) {
-        const QString thumbPath =
-            project.filePath(navigator->manifest().pages.at(index).thumbFile);
-        if (QFileInfo::exists(thumbPath)) {
-            const QPixmap pixmap(thumbPath);
-            if (!pixmap.isNull()) {
-                m_pages->item(index)->setIcon(QIcon(pixmap.scaled(128, 128, Qt::KeepAspectRatio,
-                                                                  Qt::SmoothTransformation)));
-            }
-        }
+    if (index >= 0 && index < pageCount) {
+        updateThumbnail(index);
     }
+
+    /// Whatever is on screen, including the pages either side of it, so scrolling finds the next
+    /// thumbnails already there.
+    queueThumbnails();
 
     m_status->setText(pageCount > 0
                           ? QStringLiteral("%1 — page %2 of %3").arg(label).arg(index + 1).arg(pageCount)
@@ -123,6 +135,45 @@ void PdfIoDocker::refresh(int index, int pageCount, const QString &label)
 
     m_previous->setEnabled(index > 0);
     m_next->setEnabled(index >= 0 && index + 1 < pageCount);
+}
+
+void PdfIoDocker::queueThumbnails()
+{
+    PdfPageNavigator *navigator = PdfPageNavigator::instance();
+    if (!navigator->hasNotebook()) {
+        return;
+    }
+
+    const QRect visible = m_pages->viewport()->rect();
+    for (int i = 0; i < m_pages->count(); ++i) {
+        QListWidgetItem *item = m_pages->item(i);
+        if (item && m_pages->visualItemRect(item).intersects(visible)) {
+            navigator->ensureThumbnail(i);
+        }
+    }
+}
+
+void PdfIoDocker::updateThumbnail(int index)
+{
+    if (index < 0 || index >= m_pages->count()) {
+        return;
+    }
+
+    PdfPageNavigator *navigator = PdfPageNavigator::instance();
+    if (index >= navigator->manifest().pages.size()) {
+        return;
+    }
+
+    const QString thumbPath = QDir(navigator->projectDir())
+                                  .filePath(navigator->manifest().pages.at(index).thumbFile);
+    const QPixmap pixmap(thumbPath);
+    if (pixmap.isNull()) {
+        return;
+    }
+
+    m_pages->item(index)->setIcon(QIcon(pixmap.scaled(m_pages->iconSize(),
+                                                      Qt::KeepAspectRatio,
+                                                      Qt::SmoothTransformation)));
 }
 
 void PdfIoDocker::openSelected()

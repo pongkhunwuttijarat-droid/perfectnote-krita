@@ -32,6 +32,12 @@ private Q_SLOTS:
     void refresh(int index, int pageCount, const QString &label);
     void openSelected();
 
+    /// Asks for a thumbnail of every page the list is showing. Generation is queued and one at a
+    /// time, so scrolling through a long notebook fills it in as it goes.
+    void queueThumbnails();
+
+    void updateThumbnail(int index);
+
 private:
     QLabel *m_status = nullptr;
     QListWidget *m_pages = nullptr;

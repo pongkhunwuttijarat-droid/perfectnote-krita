@@ -126,6 +126,10 @@ PdfIoPlugin::PdfIoPlugin(QObject *parent, const QVariantList &)
         /// Android is driven by the menu action. The unattended route that opened a file from the
         /// cache at startup is gone: it existed to reproduce the open path crash, and it found it.
         /// Opening a document automatically on every launch would only surprise the user now.
+        if (qEnvironmentVariableIntValue("PDFIO_PROBE_THUMBS") > 0) {
+            runThumbnailProbe();
+            return;
+        }
         if (qEnvironmentVariableIntValue("PDFIO_PROBE_PAN") > 0) {
             runPanProbe();
             return;
@@ -513,6 +517,32 @@ void PdfIoPlugin::runPanProbe()
             const QRectF atRight = converter->documentToWidget(pageRect);
             say(QStringLiteral("pan: at the far right the page right sits at %1 of %2")
                     .arg(atRight.right()).arg(widget->width()));
+        }
+    });
+}
+
+void PdfIoPlugin::runThumbnailProbe()
+{
+    PdfPageNavigator *navigator = PdfPageNavigator::instance();
+    QString why;
+    if (!navigator->openNotebook(qEnvironmentVariable("PDFIO_PROBE"), &why)) {
+        say(QStringLiteral("thumbs: cannot open the notebook: %1").arg(why));
+        return;
+    }
+
+    const QDir project(navigator->projectDir());
+    for (int i = 0; i < navigator->pageCount(); ++i) {
+        navigator->ensureThumbnail(i);
+    }
+
+    /// Time for the queue, which works one page at a time on purpose.
+    QTimer::singleShot(3000, this, [navigator, project]() {
+        for (int i = 0; i < navigator->pageCount(); ++i) {
+            const QFileInfo info(project.filePath(navigator->manifest().pages.at(i).thumbFile));
+            say(QStringLiteral("thumbs: page %1 %2 (%3 bytes)")
+                    .arg(i + 1)
+                    .arg(info.exists() ? QStringLiteral("written") : QStringLiteral("MISSING"))
+                    .arg(info.size()));
         }
     });
 }

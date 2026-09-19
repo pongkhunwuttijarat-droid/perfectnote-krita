@@ -30,6 +30,16 @@ class PdfRenderBackend;
 class PdfProjectBuilder
 {
 public:
+    /**
+     * How many pixels one rendered page may take.
+     *
+     * Not a limit: no such ceiling exists in Krita, Qt or Android. It is derived from what the
+     * device reports it has, because a page whose box is tagged at the wrong resolution can ask
+     * for tens of megapixels, and on Android a bitmap comes out of the Java heap rather than out
+     * of memory in general.
+     */
+    static qint64 maxPagePixels();
+
     static QString backgroundLayerName();
     static QString inkLayerName();
 

@@ -57,6 +57,10 @@ private:
     /// decides whether any of the turning-by-scrolling ideas can work, because a page that cannot
     /// be left behind never puts the centre of the view over a neighbour.
     void runPanProbe();
+
+    /// Temporary: asks for a thumbnail of every page and reports which ones appeared, so the lazy
+    /// path is checked without opening the docker by hand.
+    void runThumbnailProbe();
 };
 
 #endif // PDFIOPLUGIN_H

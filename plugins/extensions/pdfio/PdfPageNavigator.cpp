@@ -53,11 +53,6 @@ void say(const QString &message)
     qWarning("[pdfio] %s", qPrintable(message));
 }
 
-/// How far past a page edge the view has to be panned before the page turns, as a fraction of
-/// the viewport. The gesture that reaches the bottom of a page is the same one that would turn it,
-/// so a page has to be left behind by a clear margin before the next one arrives.
-constexpr qreal OverscrollFraction = 0.30;
-
 /// One gesture, one page.
 constexpr qint64 TurnCooldownMs = 700;
 
@@ -67,6 +62,10 @@ constexpr qint64 SettleMs = 450;
 
 /// The gap the strip decoration leaves between pages, in widget pixels.
 constexpr qreal GapWidgetPixels = 16;
+
+/// How wide a generated thumbnail is. The docker shows it smaller still; the extra is there so it
+/// stays sharp when the interface is scaled up.
+constexpr int ThumbnailPixels = 256;
 
 } // namespace
 
@@ -160,6 +159,78 @@ void PdfPageNavigator::checkScrollFollow()
     if (!showPage(pageUnderCentre, &why)) {
         say(QStringLiteral("scroll: could not open page %1 (%2)").arg(pageUnderCentre + 1).arg(why));
     }
+}
+
+void PdfPageNavigator::ensureThumbnail(int index)
+{
+    if (!hasNotebook() || index < 0 || index >= m_manifest.pages.size()) {
+        return;
+    }
+
+    const QString path = QDir(m_projectDir).filePath(m_manifest.pages.at(index).thumbFile);
+    if (QFileInfo::exists(path)) {
+        Q_EMIT thumbnailReady(index);
+        return;
+    }
+
+    if (!m_thumbnailQueue.contains(index)) {
+        m_thumbnailQueue.append(index);
+    }
+
+    if (!m_thumbnailTimer) {
+        m_thumbnailTimer = new QTimer(this);
+        connect(m_thumbnailTimer, &QTimer::timeout, this, &PdfPageNavigator::makeOneThumbnail);
+    }
+    if (!m_thumbnailTimer->isActive()) {
+        /// One at a time, slow enough that the window keeps redrawing while a long notebook fills
+        /// in.
+        m_thumbnailTimer->start(40);
+    }
+}
+
+void PdfPageNavigator::makeOneThumbnail()
+{
+    if (m_thumbnailQueue.isEmpty()) {
+        m_thumbnailTimer->stop();
+        return;
+    }
+
+    const int index = m_thumbnailQueue.takeFirst();
+    if (index < 0 || index >= m_manifest.pages.size()) {
+        return;
+    }
+
+    if (!m_thumbnailBackend) {
+        m_thumbnailBackend.reset(PdfRenderBackend::create());
+    }
+    if (!m_thumbnailBackend || !m_thumbnailBackend->isOpen()) {
+        if (!m_thumbnailBackend || !m_thumbnailBackend->open(sourcePath())) {
+            return;
+        }
+    }
+
+    /// Asked for at a resolution that produces a thumbnail directly, rather than rendered large
+    /// and shrunk: the point of a thumbnail is that it is cheap.
+    const PdfPageInfo info = m_thumbnailBackend->pageInfo(index);
+    const qreal widthPt = qMax(qreal(1), info.sizePt.width());
+    const qreal dpi = qBound(qreal(4), ThumbnailPixels * 72.0 / widthPt, qreal(150));
+
+    const QImage page = m_thumbnailBackend->renderPage(index, dpi);
+    if (page.isNull()) {
+        return;
+    }
+
+    const QImage thumbnail = page.scaled(ThumbnailPixels, ThumbnailPixels,
+                                         Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    const QString path = QDir(m_projectDir).filePath(m_manifest.pages.at(index).thumbFile);
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    if (!thumbnail.save(path, "PNG")) {
+        return;
+    }
+
+    say(QStringLiteral("thumbnail for page %1 written (%2x%3)")
+            .arg(index + 1).arg(thumbnail.width()).arg(thumbnail.height()));
+    Q_EMIT thumbnailReady(index);
 }
 
 KisView *PdfPageNavigator::currentView() const

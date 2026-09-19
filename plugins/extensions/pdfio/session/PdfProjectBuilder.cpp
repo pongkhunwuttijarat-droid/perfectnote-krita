@@ -7,8 +7,17 @@
 #include "PdfProjectBuilder.h"
 
 #include <cmath>
+#include <unistd.h>
 
 #include <QDebug>
+
+#if defined(Q_OS_ANDROID)
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+#include <QJniObject>
+#else
+#include <QAndroidJniObject>
+#endif
+#endif
 
 #include "backend/PdfRenderBackend.h"
 
@@ -62,6 +71,90 @@ KisNodeSP PdfProjectBuilder::inkStrokeLayer(const KisImageSP &image)
     return group->at(0);
 }
 
+namespace {
+
+/// Measured, not assumed: a 3.87 megapixel page costs about 41 MB resident, which is 11.1 bytes
+/// per pixel across the bitmap the renderer fills, the QImage it is read into and the layer it is
+/// converted into.
+constexpr qreal BytesPerPagePixel = 11.1;
+
+/// The share of what the device reports it has that a single page may take. The quantity is real;
+/// this fraction is a policy, and a conservative one.
+constexpr qreal PageMemoryShare = 0.05;
+
+/// On Android a bitmap comes from the Java heap, capped separately from memory in general and
+/// usually much smaller. This is the share of that heap one page may take, at four bytes a pixel.
+constexpr qreal JavaHeapShare = 0.25;
+
+/// When nothing can be read at all, and never below this, so a device that reports nonsense does
+/// not turn every page into a thumbnail.
+constexpr qint64 FallbackMaxPagePixels = 8 * 1000 * 1000;
+constexpr qint64 MinMaxPagePixels = 1 * 1000 * 1000;
+
+qint64 availableMemoryBytes()
+{
+    const long pages = sysconf(_SC_AVPHYS_PAGES);
+    const long pageSize = sysconf(_SC_PAGESIZE);
+    if (pages <= 0 || pageSize <= 0) {
+        return 0;
+    }
+    return qint64(pages) * qint64(pageSize);
+}
+
+#if defined(Q_OS_ANDROID)
+/// The Java heap a bitmap has to fit in, in bytes, or 0 when the framework will not say.
+qint64 javaHeapBytes()
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    using JniObject = QJniObject;
+#else
+    using JniObject = QAndroidJniObject;
+#endif
+
+    JniObject activity = JniObject::callStaticObjectMethod("org/qtproject/qt5/android/QtNative",
+                                                           "activity",
+                                                           "()Landroid/app/Activity;");
+    if (!activity.isValid()) {
+        return 0;
+    }
+
+    JniObject service = activity.callObjectMethod(
+        "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;",
+        JniObject::fromString(QStringLiteral("activity")).object<jstring>());
+    if (!service.isValid()) {
+        return 0;
+    }
+
+    const jint megabytes = service.callMethod<jint>("getLargeMemoryClass", "()I");
+    return megabytes > 0 ? qint64(megabytes) * 1024 * 1024 : 0;
+}
+#endif
+
+} // namespace
+
+qint64 PdfProjectBuilder::maxPagePixels()
+{
+    qint64 budget = 0;
+
+    const qint64 freeBytes = availableMemoryBytes();
+    if (freeBytes > 0) {
+        budget = qint64(freeBytes * PageMemoryShare / BytesPerPagePixel);
+    }
+
+#if defined(Q_OS_ANDROID)
+    const qint64 heapBytes = javaHeapBytes();
+    if (heapBytes > 0) {
+        const qint64 fromHeap = qint64(heapBytes * JavaHeapShare / 4.0);
+        budget = budget > 0 ? qMin(budget, fromHeap) : fromHeap;
+    }
+#endif
+
+    if (budget <= 0) {
+        return FallbackMaxPagePixels;
+    }
+    return qMax(MinMaxPagePixels, budget);
+}
+
 KisImageSP PdfProjectBuilder::buildPageImage(const PdfPageRecord &page,
                                              PdfRenderBackend &backend,
                                              qreal dpi,
@@ -72,18 +165,19 @@ KisImageSP PdfProjectBuilder::buildPageImage(const PdfPageRecord &page,
         return KisImageSP();
     }
 
-    /// A page scanned at 300 dpi is seventeen megapixels, and every one of them costs four bytes
-    /// three times over: the bitmap the renderer fills, the QImage it is read into, and the layer
-    /// it is converted into. That is how a tablet runs out of memory, and it is what happened on
-    /// the first real document this was tried on. The resolution is reduced to fit a budget.
-    constexpr qint64 MaxPagePixels = 8 * 1000 * 1000;
+    const qint64 maxPixels = maxPagePixels();
     const qreal wantedPixels =
         (page.sizePt.width() * dpi / 72.0) * (page.sizePt.height() * dpi / 72.0);
-    if (wantedPixels > MaxPagePixels) {
+    if (wantedPixels > maxPixels) {
         const qreal requestedDpi = dpi;
-        dpi *= std::sqrt(qreal(MaxPagePixels) / wantedPixels);
+        dpi *= std::sqrt(qreal(maxPixels) / wantedPixels);
+
+        /// Said out loud. A page rendered below the resolution that was asked for is a page whose
+        /// notes are drawn on a coarser grid than the user expects, and they should be able to
+        /// find out why rather than wonder whether the notebook is blurry.
         qWarning() << "[pdfio] page" << (page.index + 1) << "wants" << qint64(wantedPixels)
-                   << "pixels; rendering at" << dpi << "instead of" << requestedDpi;
+                   << "pixels but this device allows" << maxPixels
+                   << "; rendering at" << dpi << "dpi instead of" << requestedDpi;
     }
 
     const QImage rendered = backend.renderPage(page.index, dpi);
