@@ -6,6 +6,7 @@
 
 #include "PdfIoPlugin.h"
 #include "PdfIoProbe.h"
+#include "PdfPageNavigator.h"
 #include "PdfRendererSpike.h"
 
 #include <cstdio>
@@ -17,13 +18,10 @@
 #include <QFileInfo>
 #include <QMenu>
 #include <QMenuBar>
-#include <QStandardPaths>
 #include <QTimer>
 
 #if defined(PDFIO_HAVE_POPPLER)
-#include "backends/poppler/PopplerRenderBackend.h"
 #include "session/PdfPageSaver.h"
-#include "session/PdfProjectBuilder.h"
 #include "session/PdfSession.h"
 #endif
 
@@ -42,64 +40,11 @@ K_PLUGIN_FACTORY_WITH_JSON(PdfIoPluginFactory, "kritapdfio.json", registerPlugin
 
 namespace {
 
-/// Where a notebook lives: one directory per source PDF, under the application data location.
-QString projectRoot()
-{
-    return QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation))
-        .filePath(QStringLiteral("pdfio-projects"));
-}
-
 void say(const QString &message)
 {
     fprintf(stderr, "[pdfio] %s\n", qPrintable(message));
     fflush(stderr);
 }
-
-} // namespace
-
-PdfIoPlugin::PdfIoPlugin(QObject *parent, const QVariantList &)
-    : KisActionPlugin(parent)
-{
-    registerActions();
-
-    /// Temporary: answers whether the Android render backend can be pure C++.
-    PdfRendererSpike::run();
-
-    const QString probePath = qEnvironmentVariable("PDFIO_PROBE");
-    if (probePath.isEmpty()) {
-        return;
-    }
-
-    /// Krita's own message handler swallows plugin output during startup, so route everything
-    /// to stderr while the probe runs, and exercise the same entry point the action uses.
-    qInstallMessageHandler([](QtMsgType, const QMessageLogContext &, const QString &message) {
-        fprintf(stderr, "[probe] %s\n", qPrintable(message));
-        fflush(stderr);
-    });
-
-    PdfIoProbe::runIfRequested();
-
-    /// Deferred on purpose. Opening a document touches the main window, and from the plugin
-    /// constructor during startup that window is still being built: addViewAndNotifyLoadingCompleted
-    /// hides the welcome screen and walks the toolbar handler, whose action list is empty this
-    /// early. The real action is triggered by the user long after startup, so queueing the probe
-    /// the same way is both the fix and the faithful test.
-    QTimer::singleShot(0, this, [this, probePath]() {
-        const int scale = qEnvironmentVariableIntValue("PDFIO_PROBE_SCALE");
-        if (scale > 0) {
-            runScaleProbe(scale);
-            return;
-        }
-        const bool opened = openNotebook(probePath);
-        say(QStringLiteral("openNotebook(%1) = %2").arg(probePath).arg(opened));
-    });
-}
-
-PdfIoPlugin::~PdfIoPlugin()
-{
-}
-
-namespace {
 
 /// Resident set size in kilobytes, from /proc: the number that decides whether a notebook can
 /// stay open on a tablet.
@@ -118,58 +63,45 @@ qint64 residentKb()
 
 } // namespace
 
-void PdfIoPlugin::runScaleProbe(int pages)
+PdfIoPlugin::PdfIoPlugin(QObject *parent, const QVariantList &)
+    : KisActionPlugin(parent)
 {
-#if defined(PDFIO_HAVE_POPPLER)
-    const QString pdfPath = qEnvironmentVariable("PDFIO_PROBE");
-    PopplerRenderBackend backend;
-    if (!backend.open(pdfPath)) {
-        say(QStringLiteral("scale: cannot open %1").arg(pdfPath));
+    registerActions();
+
+    /// Temporary: answers whether the Android render backend can be pure C++.
+    PdfRendererSpike::run();
+
+    const QString probePath = qEnvironmentVariable("PDFIO_PROBE");
+    if (probePath.isEmpty()) {
         return;
     }
 
-    const QString root = projectRoot();
-    QDir().mkpath(root);
-    const QString base = QFileInfo(pdfPath).completeBaseName();
-    const QString key = QString::fromLatin1(PdfSessionManifest::sha256OfFile(pdfPath).left(8));
-    const QString projectDir = QDir(root).filePath(base + QLatin1Char('-') + key);
+    /// Krita's own message handler swallows plugin output during startup, so route everything to
+    /// stderr while the probe runs.
+    qInstallMessageHandler([](QtMsgType, const QMessageLogContext &, const QString &message) {
+        fprintf(stderr, "[probe] %s\n", qPrintable(message));
+        fflush(stderr);
+    });
 
-    QString why;
-    const PdfSessionManifest manifest =
-        QFileInfo::exists(PdfSession::manifestPath(projectDir))
-            ? PdfSession::openProject(projectDir, &why)
-            : PdfSession::createProject(projectDir, pdfPath, backend, &why);
-    if (!manifest.isValid(&why)) {
-        say(QStringLiteral("scale: project failed: %1").arg(why));
-        return;
-    }
+    PdfIoProbe::runIfRequested();
 
-    say(QStringLiteral("scale: pages available %1, rss before %2 KB")
-            .arg(manifest.pages.size())
-            .arg(residentKb()));
-
-    const int count = qMin(pages, manifest.pages.size());
-    for (int i = 0; i < count; ++i) {
-        KisImageSP image = PdfProjectBuilder::buildPageImage(manifest.pages.at(i), backend, 200.0, &why);
-        if (!image) {
-            say(QStringLiteral("scale: page %1 failed: %2").arg(i + 1).arg(why));
-            continue;
+    /// Deferred on purpose. Opening a document touches the main window, and from the plugin
+    /// constructor during startup that window is still being built: the welcome screen and the
+    /// toolbar handler are not ready. The real action is triggered long after startup, so queueing
+    /// the probe the same way is both the fix and a faithful stand-in.
+    QTimer::singleShot(0, this, [this, probePath]() {
+        const int scale = qEnvironmentVariableIntValue("PDFIO_PROBE_SCALE");
+        if (scale > 0) {
+            runScaleProbe(scale);
+            return;
         }
+        const bool opened = openNotebook(probePath);
+        say(QStringLiteral("openNotebook(%1) = %2").arg(probePath).arg(opened));
+    });
+}
 
-        KisDocument *document = KisPart::instance()->createDocument();
-        document->setCurrentImage(image, true, PdfProjectBuilder::inkStrokeLayer(image));
-        KisPart::instance()->addDocument(document);
-
-        if (KisMainWindow *window = viewManager() ? viewManager()->mainWindow() : nullptr) {
-            window->addViewAndNotifyLoadingCompleted(document);
-        }
-
-        say(QStringLiteral("scale: page %1/%2 rss %3 KB documents %4")
-                .arg(i + 1).arg(count).arg(residentKb()).arg(KisPart::instance()->documentCount()));
-    }
-#else
-    Q_UNUSED(pages);
-#endif
+PdfIoPlugin::~PdfIoPlugin()
+{
 }
 
 void PdfIoPlugin::registerActions()
@@ -178,34 +110,39 @@ void PdfIoPlugin::registerActions()
         return;
     }
 
-    KisAction *openAction = viewManager()->actionManager()->createAction(QStringLiteral("pdfio_open_notebook"));
-    if (openAction) {
-        connect(openAction, &KisAction::triggered, this, &PdfIoPlugin::slotOpenNotebook);
-    }
+    struct Entry {
+        const char *name;
+        void (PdfIoPlugin::*slot)();
+    };
 
-    KisAction *saveAction = viewManager()->actionManager()->createAction(QStringLiteral("pdfio_save_page"));
-    if (saveAction) {
-        connect(saveAction, &KisAction::triggered, this, &PdfIoPlugin::slotSavePage);
-    }
+    const Entry entries[] = {
+        { "pdfio_open_notebook", &PdfIoPlugin::slotOpenNotebook },
+        { "pdfio_save_page", &PdfIoPlugin::slotSavePage },
+        { "pdfio_next_page", &PdfIoPlugin::slotNextPage },
+        { "pdfio_previous_page", &PdfIoPlugin::slotPreviousPage },
+    };
 
-    /// Creating an action does not put it anywhere. Without this the plugin is invisible: the
-    /// actions exist in the collection and no menu ever shows them, which is exactly what
-    /// "I don't see anything" looks like.
     KisMainWindow *window = viewManager()->mainWindow();
-    if (!window || !window->menuBar()) {
-        return;
+    QMenu *menu = nullptr;
+    if (window && window->menuBar()) {
+        menu = window->menuBar()->findChild<QMenu *>(QStringLiteral("pdfio_menu"));
+        if (!menu) {
+            menu = window->menuBar()->addMenu(i18n("PDF Notebook"));
+            menu->setObjectName(QStringLiteral("pdfio_menu"));
+        }
     }
 
-    QMenu *menu = window->menuBar()->findChild<QMenu *>(QStringLiteral("pdfio_menu"));
-    if (!menu) {
-        menu = window->menuBar()->addMenu(i18n("PDF Notebook"));
-        menu->setObjectName(QStringLiteral("pdfio_menu"));
-    }
-    if (openAction) {
-        menu->addAction(openAction);
-    }
-    if (saveAction) {
-        menu->addAction(saveAction);
+    for (const Entry &entry : entries) {
+        KisAction *action = viewManager()->actionManager()->createAction(QString::fromLatin1(entry.name));
+        if (!action) {
+            continue;
+        }
+        connect(action, &KisAction::triggered, this, entry.slot);
+
+        /// Creating an action does not put it anywhere. Without this the plugin is invisible.
+        if (menu) {
+            menu->addAction(action);
+        }
     }
 }
 
@@ -219,8 +156,24 @@ void PdfIoPlugin::slotOpenNotebook()
         return;
     }
 
-    if (!openNotebook(path)) {
+    if (!PdfPageNavigator::instance()->openNotebook(path, nullptr)) {
         qWarning() << "pdfio could not open" << path;
+    }
+}
+
+void PdfIoPlugin::slotNextPage()
+{
+    QString why;
+    if (!PdfPageNavigator::instance()->next(&why)) {
+        qWarning() << "pdfio:" << why;
+    }
+}
+
+void PdfIoPlugin::slotPreviousPage()
+{
+    QString why;
+    if (!PdfPageNavigator::instance()->previous(&why)) {
+        qWarning() << "pdfio:" << why;
     }
 }
 
@@ -250,8 +203,8 @@ void PdfIoPlugin::slotSavePage()
     const QString path = QDir(projectDir).filePath(PdfSession::pageFileName(pageIndex));
     QDir().mkpath(QFileInfo(path).absolutePath());
 
-    /// Krita saves in the background, so the copy has to outlive this call. It is deleted when
-    /// the save reports back, rather than by waiting here: a nested event loop around
+    /// Krita saves in the background, so the copy has to outlive this call. It is deleted when the
+    /// save reports back, rather than by waiting here: a nested event loop around
     /// sigSavingFinished wedged on the second save.
     connect(inkOnly, &KisDocument::sigSavingFinished, this, [inkOnly, path](const QString &) {
         say(QStringLiteral("saved %1 (%2 bytes)").arg(path).arg(QFileInfo(path).size()));
@@ -269,77 +222,57 @@ void PdfIoPlugin::slotSavePage()
 
 bool PdfIoPlugin::openNotebook(const QString &pdfPath)
 {
-#if defined(PDFIO_HAVE_POPPLER)
-    if (!QFileInfo::exists(pdfPath)) {
-        say(QStringLiteral("no such file: %1").arg(pdfPath));
-        return false;
-    }
-
-    PopplerRenderBackend backend;
-    if (!backend.open(pdfPath)) {
-        say(QStringLiteral("the renderer cannot open %1").arg(pdfPath));
-        return false;
-    }
-
-    const QString root = projectRoot();
-    if (!QDir().mkpath(root)) {
-        say(QStringLiteral("cannot create %1").arg(root));
-        return false;
-    }
-
-    /// One directory per source PDF, keyed by its content, so reopening the same document
-    /// returns to the same notebook instead of starting a second one.
-    const QString base = QFileInfo(pdfPath).completeBaseName();
-    const QString key = QString::fromLatin1(PdfSessionManifest::sha256OfFile(pdfPath).left(8));
-    const QString projectDir = QDir(root).filePath(base + QLatin1Char('-') + key);
-
     QString why;
-    const PdfSessionManifest manifest =
-        QFileInfo::exists(PdfSession::manifestPath(projectDir))
-            ? PdfSession::openProject(projectDir, &why)
-            : PdfSession::createProject(projectDir, pdfPath, backend, &why);
-
-    if (!manifest.isValid(&why)) {
-        say(QStringLiteral("project failed: %1").arg(why));
-        return false;
+    const bool opened = PdfPageNavigator::instance()->openNotebook(pdfPath, &why);
+    if (!opened) {
+        say(QStringLiteral("openNotebook failed: %1").arg(why));
     }
+    return opened;
+}
 
-    KisImageSP image = PdfProjectBuilder::buildPageImage(manifest.pages.first(), backend, 200.0, &why);
-    if (!image) {
-        say(QStringLiteral("page failed: %1").arg(why));
-        return false;
+void PdfIoPlugin::runScaleProbe(int pages)
+{
+    PdfPageNavigator *navigator = PdfPageNavigator::instance();
+    QString why;
+
+    say(QStringLiteral("scale: rss before %1 KB").arg(residentKb()));
+
+    if (!navigator->openNotebook(qEnvironmentVariable("PDFIO_PROBE"), &why)) {
+        say(QStringLiteral("scale: cannot open the notebook: %1").arg(why));
+        return;
     }
+    say(QStringLiteral("scale: page %1 rss %2 KB").arg(navigator->currentIndex() + 1).arg(residentKb()));
 
-    KisDocument *document = KisPart::instance()->createDocument();
-    document->documentInfo()->setAboutInfo(QStringLiteral("title"), base);
-    /// Activate the paintable layer inside Ink, not the group: opening on the group would leave
-    /// the user unable to draw even once the layer exists.
-    document->setCurrentImage(image, true, PdfProjectBuilder::inkStrokeLayer(image));
+    /// Driven by a timer rather than a loop, and not for tidiness: closing a page defers the
+    /// destruction of its view and document, so a tight loop frees nothing and the measurement
+    /// would show growth that does not exist in use. A person also does not turn eight pages in
+    /// the same millisecond.
+    auto *timer = new QTimer(this);
+    auto *turned = new int(1);
 
-    /// The save action has to find the project and the page again from the document alone.
-    document->setProperty("pdfioProjectDir", projectDir);
-    document->setProperty("pdfioPageIndex", manifest.pages.first().index);
+    connect(timer, &QTimer::timeout, this, [this, timer, turned, pages, navigator]() {
+        QString why;
+        if (*turned >= pages) {
+            say(QStringLiteral("scale: done after %1 pages").arg(*turned));
+            timer->stop();
+            timer->deleteLater();
+            delete turned;
+            return;
+        }
 
-    KisPart::instance()->addDocument(document);
+        if (!navigator->next(&why)) {
+            say(QStringLiteral("scale: stopped after %1 pages: %2").arg(*turned).arg(why));
+            timer->stop();
+            timer->deleteLater();
+            delete turned;
+            return;
+        }
 
-    KisMainWindow *window = viewManager() ? viewManager()->mainWindow() : nullptr;
-    if (window) {
-        window->addViewAndNotifyLoadingCompleted(document);
-    }
+        ++(*turned);
+        say(QStringLiteral("scale: page %1 rss %2 KB").arg(navigator->currentIndex() + 1).arg(residentKb()));
+    });
 
-    say(QStringLiteral("opened %1: %2 pages, page %3 at %4x%5, project %6")
-            .arg(base)
-            .arg(manifest.pages.size())
-            .arg(manifest.pages.first().index + 1)
-            .arg(image->width())
-            .arg(image->height())
-            .arg(projectDir));
-    return true;
-#else
-    Q_UNUSED(pdfPath);
-    say(QStringLiteral("no PDF backend on this platform yet"));
-    return false;
-#endif
+    timer->start(600);
 }
 
 #include "PdfIoPlugin.moc"

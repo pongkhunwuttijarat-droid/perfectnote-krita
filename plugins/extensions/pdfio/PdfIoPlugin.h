@@ -37,6 +37,8 @@ public:
 private Q_SLOTS:
     void slotOpenNotebook();
     void slotSavePage();
+    void slotNextPage();
+    void slotPreviousPage();
 
 private:
     void registerActions();

@@ -28,5 +28,31 @@
        <isCheckable>false</isCheckable>
        <statusTip></statusTip>
      </Action>
+
+     <Action name="pdfio_next_page">
+       <icon></icon>
+       <text>Next page</text>
+       <whatsThis></whatsThis>
+       <toolTip></toolTip>
+       <iconText></iconText>
+       <activationFlags>10000</activationFlags>
+       <activationConditions>0</activationConditions>
+       <shortcut>PgDown</shortcut>
+       <isCheckable>false</isCheckable>
+       <statusTip></statusTip>
+     </Action>
+
+     <Action name="pdfio_previous_page">
+       <icon></icon>
+       <text>Previous page</text>
+       <whatsThis></whatsThis>
+       <toolTip></toolTip>
+       <iconText></iconText>
+       <activationFlags>10000</activationFlags>
+       <activationConditions>0</activationConditions>
+       <shortcut>PgUp</shortcut>
+       <isCheckable>false</isCheckable>
+       <statusTip></statusTip>
+     </Action>
   </Actions>
 </ActionCollection>

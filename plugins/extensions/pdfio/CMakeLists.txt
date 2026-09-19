@@ -13,6 +13,7 @@ target_include_directories(kritapdfio PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 # Everything above PdfRenderBackend is platform neutral, which is the point of the split.
 if (Poppler_Qt${QT_MAJOR_VERSION}_FOUND)
     target_sources(kritapdfio PRIVATE
+        PdfPageNavigator.cpp
         backends/poppler/PopplerRenderBackend.cpp
         session/PdfSession.cpp
         session/PdfSessionManifest.cpp
