@@ -16,6 +16,8 @@
 #include <QTimer>
 
 #include "backend/PdfRenderBackend.h"
+#include "session/PdfExporter.h"
+#include "session/PdfInkLoader.h"
 #include "session/PdfPageSaver.h"
 #include "session/PdfProjectBuilder.h"
 #include "session/PdfSession.h"
@@ -170,6 +172,13 @@ void runIfRequested()
          qPrintable(image->root()->at(0)->name()), int(image->root()->at(0)->userLocked()),
          qPrintable(image->root()->at(1)->name()), int(image->root()->at(1)->childCount()));
 
+    /// Something recognisable to draw, so the export can be checked by rendering it: a bar a
+    /// hundred pixels in from the top left of the page as it is displayed, at 200 dpi.
+    if (KisPaintLayer *stroke = qobject_cast<KisPaintLayer *>(PdfProjectBuilder::inkStrokeLayer(image).data())) {
+        stroke->paintDevice()->fill(QRect(100, 100, 200, 40),
+                                    KoColor(Qt::black, image->colorSpace()));
+    }
+
     /// The file size bound: a document holding only the ink, never the page.
     KisDocument *inkOnly = PdfPageSaver::createInkOnlyDocument(image, &why);
     if (!inkOnly) {
@@ -201,6 +210,47 @@ void runIfRequested()
          int(finished), qint64(raw.size()), int(raw.contains("mergedimage.png")));
 
     KisPart::instance()->removeDocument(inkOnly, true);
+
+    /// The whole circle, and the only check that matters for an export: the ink that was just
+    /// written is read back out of the artifact, composited over the source, and the result is
+    /// rendered to see where it landed.
+    const QImage loaded = PdfInkLoader::loadInk(path, &why);
+    note("ink loader: %dx%d from the artifact", loaded.width(), loaded.height());
+
+    QHash<int, QImage> ink;
+    if (!loaded.isNull()) {
+        ink.insert(manifest.pages.at(1).index, loaded);
+    }
+
+    const QString exportedPath = QDir(projectDir).filePath(QStringLiteral("exported.pdf"));
+    note("export: %d (%s)",
+         int(PdfExporter::exportWithInk(fixture, manifest, ink, exportedPath, &why)), qPrintable(why));
+
+    QScopedPointer<PdfRenderBackend> checker(PdfRenderBackend::create());
+    if (checker && checker->open(exportedPath)) {
+        const QImage rendered = checker->renderPage(manifest.pages.at(1).index, 72.0);
+
+        int x0 = rendered.width();
+        int y0 = rendered.height();
+        int x1 = -1;
+        int y1 = -1;
+        for (int y = 0; y < rendered.height(); ++y) {
+            for (int x = 0; x < rendered.width(); ++x) {
+                const QRgb pixel = rendered.pixel(x, y);
+                if (qAlpha(pixel) > 0 && qGray(pixel) < 200) {
+                    x0 = qMin(x0, x);
+                    y0 = qMin(y0, y);
+                    x1 = qMax(x1, x);
+                    y1 = qMax(y1, y);
+                }
+            }
+        }
+
+        /// The mark was drawn a hundred pixels in at 200 dpi, which is thirty six points, so it
+        /// has to come back around thirty six pixels in at 72 dpi.
+        note("exported page render %dx%d, dark bounds %d,%d-%d,%d (expected about 36,36)",
+             rendered.width(), rendered.height(), x0, y0, x1, y1);
+    }
 }
 
 } // namespace PdfIoProbe

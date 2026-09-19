@@ -9,6 +9,10 @@
 #include <QDebug>
 #include <QFileInfo>
 
+/// <KArchive> first: the KF5 headers for the individual classes lean on it for KArchive itself
+/// and do not include it, which fails on the Android build where the umbrella include is the only
+/// thing that brings the type in.
+#include <KArchive>
 #include <KArchiveDirectory>
 #include <KArchiveEntry>
 #include <KArchiveFile>
@@ -23,21 +27,19 @@ void fail(QString *why, const QString &message)
     }
 }
 
-/// A paint layer is stored as a PNG with no extension, next to companions that carry the same
-/// name plus a suffix: the default pixel value, the colour profile, a pixel selection. Only the
-/// PNG itself is wanted, and it is the only one that is actually an image.
-bool isPaintLayer(const QString &name)
+/// The merged image of an artifact whose document holds only ink *is* the ink.
+///
+/// The obvious approach, reading the paint layer, does not work: Krita stores a layer in its own
+/// tile format, not as a PNG, so the layer entry begins with "VERSION 2" and no image loader will
+/// touch it. The merged image is a PNG, and because page artifacts deliberately contain no page
+/// background it is the flatten of the ink and nothing else. It also gets the case of several ink
+/// layers right for free, which reading one layer would not.
+bool isMergedImage(const QString &name)
 {
-    if (!name.contains(QLatin1String("/layers/"))) {
-        return false;
-    }
-    return !name.endsWith(QLatin1String(".defaultpixel"))
-        && !name.endsWith(QLatin1String(".icc"))
-        && !name.endsWith(QLatin1String(".pixelselection"))
-        && !name.endsWith(QLatin1String(".pixelselection.defaultpixel"));
+    return name.endsWith(QLatin1String("mergedimage.png"));
 }
 
-void collectLayers(const KArchiveDirectory *directory, const QString &prefix, QList<QByteArray> *found)
+void collectMergedImage(const KArchiveDirectory *directory, const QString &prefix, QList<QByteArray> *found)
 {
     const QStringList entries = directory->entries();
     for (const QString &entry : entries) {
@@ -48,12 +50,12 @@ void collectLayers(const KArchiveDirectory *directory, const QString &prefix, QL
 
         const QString path = prefix + QLatin1Char('/') + entry;
         if (const KArchiveDirectory *sub = dynamic_cast<const KArchiveDirectory *>(child)) {
-            collectLayers(sub, path, found);
+            collectMergedImage(sub, path, found);
             continue;
         }
 
         if (const KArchiveFile *file = dynamic_cast<const KArchiveFile *>(child)) {
-            if (isPaintLayer(path)) {
+            if (isMergedImage(path)) {
                 found->append(file->data());
             }
         }
@@ -81,12 +83,11 @@ QImage PdfInkLoader::loadInk(const QString &kraPath, QString *why)
         return QImage();
     }
 
-    QList<QByteArray> layers;
-    collectLayers(root, QString(), &layers);
+    QList<QByteArray> candidates;
+    collectMergedImage(root, QString(), &candidates);
 
-    /// The biggest one: a note is made of paint, and any companion entry is small.
     QByteArray best;
-    for (const QByteArray &candidate : layers) {
+    for (const QByteArray &candidate : candidates) {
         if (candidate.size() > best.size()) {
             best = candidate;
         }
@@ -98,7 +99,7 @@ QImage PdfInkLoader::loadInk(const QString &kraPath, QString *why)
 
     QImage ink;
     if (!ink.loadFromData(best, "PNG")) {
-        fail(why, QStringLiteral("the ink layer of %1 is not readable").arg(kraPath));
+        fail(why, QStringLiteral("the merged image of %1 is not readable").arg(kraPath));
         return QImage();
     }
 

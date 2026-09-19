@@ -22,16 +22,16 @@
 #include <QMenuBar>
 #include <QTimer>
 
-#if defined(PDFIO_HAVE_POPPLER)
+/// Not behind PDFIO_HAVE_POPPLER: the session, the saver, the ink loader and the exporter are all
+/// plain C++ and are built on every platform. Only the renderer differs, and that is chosen by
+/// PdfRenderBackend::create.
 #include "session/PdfExporter.h"
 #include "session/PdfInkLoader.h"
 #include "session/PdfPageSaver.h"
 #include "session/PdfSession.h"
 
-
 #include <QHash>
 #include <QImage>
-#endif
 
 #include <KoDocumentInfo.h>
 
@@ -292,7 +292,7 @@ void PdfIoPlugin::slotExportPdf()
 
 void PdfIoPlugin::slotSavePage()
 {
-#if defined(PDFIO_HAVE_POPPLER)
+    /// No platform guard: the saver is plain C++ and works wherever a render backend does.
     KisDocument *document = viewManager() ? viewManager()->document() : nullptr;
     if (!document || !document->image()) {
         qWarning() << "pdfio: no page is open";
@@ -328,9 +328,6 @@ void PdfIoPlugin::slotSavePage()
         qWarning() << "pdfio: cannot save:" << why;
         KisPart::instance()->removeDocument(inkOnly, true);
     }
-#else
-    qWarning() << "pdfio: saving needs a PDF backend";
-#endif
 }
 
 bool PdfIoPlugin::openNotebook(const QString &pdfPath)
