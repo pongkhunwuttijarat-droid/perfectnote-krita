@@ -20,6 +20,8 @@
 
 #include <QRect>
 
+#include <functional>
+
 #include <kis_types.h>
 
 class KisDocument;
@@ -52,6 +54,15 @@ public:
 
     /// The document of the page that is open, if one is.
     KisDocument *currentDocument() const;
+
+    /**
+     * Writes every page that is currently in the strip, not only the one that is open.
+     *
+     * The strip holds its ink in one layer, and which page a stroke belongs to is decided by the
+     * rectangle it sits in -- so the cropping can be done whenever, for as many pages as are open,
+     * rather than only for the page being left.
+     */
+    bool saveStripPages();
 
     /// The view showing it, for code that needs the canvas rather than the document.
     KisView *currentView() const;
@@ -112,7 +123,11 @@ private:
      * Called before a page is left behind, not only when the user asks: turning a page used to
      * remove the document, and nothing had ever been saved from it, so the ink went with it.
      */
-    bool saveCurrentPage(QString *why = nullptr);
+    bool saveCurrentPage(QString *why = nullptr, int index = -1, std::function<void()> then = nullptr);
+
+    /// Writes one page of the strip: its rectangle cropped out of the single ink layer. \a then
+    /// is called once the save has finished, which is how the pages are chained.
+    bool savePage(int index, std::function<void()> then = nullptr);
 
     static QString projectRoot();
 

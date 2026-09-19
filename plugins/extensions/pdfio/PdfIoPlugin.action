@@ -42,6 +42,19 @@
        <statusTip></statusTip>
      </Action>
 
+     <Action name="pdfio_save_notebook">
+       <icon></icon>
+       <text>Save the notebook</text>
+       <whatsThis></whatsThis>
+       <toolTip></toolTip>
+       <iconText></iconText>
+       <activationFlags>10000</activationFlags>
+       <activationConditions>0</activationConditions>
+       <shortcut></shortcut>
+       <isCheckable>false</isCheckable>
+       <statusTip></statusTip>
+     </Action>
+
      <Action name="pdfio_export_pdf">
        <icon></icon>
        <text>Export the notebook to PDF</text>

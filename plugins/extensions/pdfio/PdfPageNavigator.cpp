@@ -469,11 +469,18 @@ bool PdfPageNavigator::activateWithinStrip(int index, QString *why)
     /// there is nothing to activate. Which page a stroke belongs to is decided when the page is
     /// saved, by cropping the rectangle the page occupies.
 
-    /// And show it. A strip holds several pages in one image, so making another page active does
-    /// not move the view by itself: without this the page that just became active is the one the
-    /// user cannot see, and the one they can see is a locked neighbour that refuses their strokes.
+    /// And put it in the middle of the viewport.
+    ///
+    /// A strip holds several pages in one image, so making another page active does not move the
+    /// view at all: the page that just became active is the one the user cannot see. Centring it
+    /// leaves the page above and the page below partly on screen, so which page is being written
+    /// on is visible rather than something to look up in a layer panel -- and turning a page moves
+    /// the canvas, which is what a page turn should feel like.
+    ///
+    /// ensureVisibleDoc was not enough: it only scrolls far enough to bring a rectangle into view,
+    /// and a page taller than the viewport can be "in view" while sitting anywhere.
     if (m_view && m_view->canvasController() && slot < m_stripRects.size()) {
-        m_view->canvasController()->ensureVisibleDoc(QRectF(m_stripRects.at(slot)), true);
+        m_view->canvasController()->setPreferredCenter(QPointF(m_stripRects.at(slot).center()));
     }
 
     m_stripActiveSlot = slot;
@@ -641,9 +648,18 @@ bool PdfPageNavigator::showImage(KisImageSP image, KisNodeSP activeNode, int ind
                 return;
             }
 
+            /// Sized so the active page takes about three fifths of the viewport.
+            ///
+            /// Fitting the page exactly filled the viewport, and then the page that comes next is
+            /// simply not on screen however the view is centred -- "even at page three you cannot
+            /// see four". Leaving two fifths of the height free puts the top of the next page and
+            /// the bottom of the previous one on screen, with the active page between them.
+            constexpr qreal ActivePageShare = 0.6;
+
             const qreal zoom = qBound(qreal(0.02),
                                       qMin(qreal(viewport.width()) / pageRect.width(),
-                                           qreal(viewport.height()) / pageRect.height()),
+                                           (qreal(viewport.height()) * ActivePageShare)
+                                               / pageRect.height()),
                                       qreal(8.0));
 
             say(QStringLiteral("zoom: fitting a %1x%2 page into a %3x%4 viewport gives %5")
@@ -651,7 +667,7 @@ bool PdfPageNavigator::showImage(KisImageSP image, KisNodeSP activeNode, int ind
                     .arg(viewport.width()).arg(viewport.height()).arg(zoom));
 
             viewGuard->canvasController()->setZoom(KoZoomMode::ZOOM_CONSTANT, zoom);
-            viewGuard->canvasController()->ensureVisibleDoc(QRectF(pageRect), true);
+            viewGuard->canvasController()->setPreferredCenter(QPointF(pageRect.center()));
         });
     }
 
@@ -704,24 +720,69 @@ bool PdfPageNavigator::showImage(KisImageSP image, KisNodeSP activeNode, int ind
     return true;
 }
 
-bool PdfPageNavigator::saveCurrentPage(QString *why)
+bool PdfPageNavigator::saveStripPages()
 {
-    if (!m_document || !m_document->image() || m_index < 0 || m_index >= m_manifest.pages.size()) {
+    if (m_stripPages.isEmpty()) {
+        /// A document holding one page has nothing to crop; the usual save is the whole of it.
+        QString why;
+        if (!saveCurrentPage(&why)) {
+            say(QStringLiteral("could not save the page: %1").arg(why));
+            return false;
+        }
+        return true;
+    }
+
+    /// One after another, each started when the last reports finished. Krita saves in the
+    /// background, and starting a second save while the first is running wedges it -- which is how
+    /// the earlier attempt at saving several pages ended.
+    QList<int> pages;
+    for (int page : m_stripPages) {
+        if (page >= 0) {
+            pages.append(page);
+        }
+    }
+
+    say(QStringLiteral("saving %1 pages of the strip").arg(pages.size()));
+
+    std::function<void(int)> saveNext = [this, pages, saveNext](int at) mutable {
+        if (at >= pages.size()) {
+            say(QStringLiteral("saved %1 pages").arg(pages.size()));
+            return;
+        }
+
+        const int page = pages.at(at);
+        if (!savePage(page, [saveNext, at]() mutable { saveNext(at + 1); })) {
+            say(QStringLiteral("could not save page %1").arg(page + 1));
+        }
+    };
+
+    saveNext(0);
+    return true;
+}
+
+bool PdfPageNavigator::savePage(int index, std::function<void()> then)
+{
+    return saveCurrentPage(nullptr, index, then);
+}
+
+bool PdfPageNavigator::saveCurrentPage(QString *why, int index, std::function<void()> then)
+{
+    /// Which page to write. Not necessarily the one that is open: the whole strip can be written
+    /// in one go, because which page a stroke belongs to is decided by the rectangle it sits in.
+    const int page = index >= 0 ? index : m_index;
+    if (!m_document || !m_document->image() || page < 0 || page >= m_manifest.pages.size()) {
         /// Nothing open is not a failure; it only means there is nothing to write.
         return true;
     }
 
-    /// What belongs to the page that is open. In a strip, that is the page's own group cropped to
-    /// its own rectangle; in a document that holds one page it is everything, and no cropping is
-    /// needed. Without this a save would write the whole strip as one page's ink.
+    /// The rectangle that page occupies in the strip, and the one ink layer everything is in. A
+    /// document holding one page has neither, and needs no cropping.
     QRect pageArea;
     QList<KisNodeSP> inkLayers;
-    if (!m_stripPages.isEmpty() && m_stripActiveSlot >= 0
-        && m_stripActiveSlot < m_stripRects.size()) {
-        pageArea = m_stripRects.at(m_stripActiveSlot);
+    const int slot = m_stripPages.indexOf(page);
+    if (slot >= 0 && slot < m_stripRects.size()) {
+        pageArea = m_stripRects.at(slot);
 
-        /// The strip's one ink layer. The page this crop belongs to is decided here, by the
-        /// rectangle, rather than by which layer the strokes went into.
         for (quint32 i = 0; i < m_document->image()->root()->childCount(); ++i) {
             KisNodeSP child = m_document->image()->root()->at(i);
             if (child->name() == QStringLiteral("Ink")) {
@@ -739,7 +800,7 @@ bool PdfPageNavigator::saveCurrentPage(QString *why)
     /// holds without opening it. A thumbnail is a scaled copy, not a document, which is the whole
     /// reason this is affordable and rendering neighbouring pages is not.
     const QDir project(m_projectDir);
-    const QString thumbPath = project.filePath(m_manifest.pages.at(m_index).thumbFile);
+    const QString thumbPath = project.filePath(m_manifest.pages.at(page).thumbFile);
     if (KisPaintDeviceSP projection = m_document->image()->projection()) {
         /// Of the page's own rectangle, or a strip's thumbnail would be a picture of the strip.
         const QImage thumb =
@@ -763,14 +824,21 @@ bool PdfPageNavigator::saveCurrentPage(QString *why)
     }
 
     const QString path = QDir(m_projectDir).filePath(
-        PdfSession::pageFileName(m_manifest.pages.at(m_index).index));
+        PdfSession::pageFileName(m_manifest.pages.at(page).index));
     QDir().mkpath(QFileInfo(path).absolutePath());
 
     /// Deleted when the save reports back rather than by waiting: a nested event loop around
     /// sigSavingFinished wedged on the second save.
-    QObject::connect(inkOnly, &KisDocument::sigSavingFinished, inkOnly, [inkOnly, path](const QString &) {
+    QObject::connect(inkOnly, &KisDocument::sigSavingFinished, inkOnly,
+                     [this, inkOnly, path, page, then](const QString &) {
         say(QStringLiteral("saved %1 (%2 bytes)").arg(path).arg(QFileInfo(path).size()));
         KisPart::instance()->removeDocument(inkOnly, true);
+
+        /// Whoever queued this page hears back only once it is actually on disk, which is how the
+        /// pages of a strip are written one after another rather than all at once.
+        if (then) {
+            then();
+        }
     });
 
     if (!PdfPageSaver::saveInkOnly(inkOnly, path, why)) {
@@ -781,7 +849,7 @@ bool PdfPageNavigator::saveCurrentPage(QString *why)
     /// The thumbnail of this page has just been rewritten from the ink that was saved, so anything
     /// showing it -- the page selector -- is told, rather than waiting for the page to be opened
     /// again before it notices.
-    Q_EMIT thumbnailReady(m_index);
+    Q_EMIT thumbnailReady(page);
 
     return true;
 }

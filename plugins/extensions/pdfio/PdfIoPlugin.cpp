@@ -52,6 +52,7 @@
 #include <KisMainWindow.h>
 #include <KisPart.h>
 #include <KisViewManager.h>
+#include <kis_canvas_controller.h>
 #include <kis_node_manager.h>
 #include <kis_action.h>
 #include <kis_action_manager.h>
@@ -176,6 +177,7 @@ void PdfIoPlugin::registerActions()
         { "pdfio_next_page", &PdfIoPlugin::slotNextPage },
         { "pdfio_previous_page", &PdfIoPlugin::slotPreviousPage },
         { "pdfio_export_pdf", &PdfIoPlugin::slotExportPdf },
+        { "pdfio_save_notebook", &PdfIoPlugin::slotSaveNotebook },
     };
 
     KisMainWindow *window = viewManager()->mainWindow();
@@ -272,6 +274,16 @@ void PdfIoPlugin::slotPreviousPage()
     QString why;
     if (!PdfPageNavigator::instance()->previous(&why)) {
         qWarning() << "pdfio:" << why;
+    }
+}
+
+void PdfIoPlugin::slotSaveNotebook()
+{
+    /// Every page in the strip, not only the one that is open. Their ink is all in one layer and
+    /// each page is picked out by the rectangle it occupies, so the cropping can be done whenever
+    /// rather than only on the way out of a page.
+    if (!PdfPageNavigator::instance()->saveStripPages()) {
+        qWarning() << "pdfio: could not save the notebook";
     }
 }
 
@@ -606,9 +618,22 @@ void PdfIoPlugin::runStripProbe()
         return node ? node->name() : QStringLiteral("(none)");
     };
 
-    say(QStringLiteral("strip: active node before any turn is \"%1\"").arg(activeNodeName()));
+    /// Where the canvas is looking. The page that is active is meant to be in the middle of the
+    /// viewport, so turning a page has to move this -- and if it does not, the page did not move on
+    /// screen however correct everything else is.
+    auto centreName = [navigator]() {
+        KisView *view = navigator->currentView();
+        if (!view || !view->canvasController()) {
+            return QStringLiteral("(no controller)");
+        }
+        const QPointF c = view->canvasController()->preferredCenter();
+        return QStringLiteral("%1,%2").arg(int(c.x())).arg(int(c.y()));
+    };
 
-    QTimer::singleShot(700, this, [this, navigator, first, activeNodeName]() {
+    say(QStringLiteral("strip: active node before any turn is \"%1\"").arg(activeNodeName()));
+    say(QStringLiteral("strip: the canvas is looking at %1 before any turn").arg(centreName()));
+
+    QTimer::singleShot(700, this, [this, navigator, first, activeNodeName, centreName]() {
         QString why;
         say(QStringLiteral("strip: turning forward"));
         if (!navigator->next(&why)) {
@@ -618,8 +643,10 @@ void PdfIoPlugin::runStripProbe()
 
         say(QStringLiteral("strip: active node after turning forward is \"%1\"")
                 .arg(activeNodeName()));
+        say(QStringLiteral("strip: the canvas is looking at %1 after turning forward")
+                .arg(centreName()));
 
-        QTimer::singleShot(700, this, [this, navigator, first, activeNodeName]() {
+        QTimer::singleShot(700, this, [this, navigator, first, activeNodeName, centreName]() {
             QString why;
             say(QStringLiteral("strip: turning back"));
             if (!navigator->previous(&why)) {

@@ -40,6 +40,7 @@ private Q_SLOTS:
     void slotNextPage();
     void slotPreviousPage();
     void slotExportPdf();
+    void slotSaveNotebook();
 
 private:
     void registerActions();
