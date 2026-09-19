@@ -196,7 +196,7 @@ public class MainActivity extends QtActivity {
     public boolean dispatchKeyEvent(KeyEvent event) {
         final int keyCode = event.getKeyCode();
         if (keyCode >= STYLUS_GESTURE_KEY_FIRST && keyCode <= STYLUS_GESTURE_KEY_LAST) {
-            JNIWrappers.stylusGestureKey(keyCode, event.getAction());
+            JNIWrappers.stylusGestureKey(keyCode, event.getAction(), event.getRepeatCount());
             return true;
         }
         return super.dispatchKeyEvent(event);

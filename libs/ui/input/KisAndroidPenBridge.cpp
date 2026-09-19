@@ -75,10 +75,17 @@ void triggerStylusGestureAction(jint keyCode)
 
 extern "C" JNIEXPORT void JNICALL
 Java_org_krita_android_JNIWrappers_stylusGestureKey(JNIEnv * /*env*/, jobject /*obj*/,
-                                                    jint keyCode, jint action)
+                                                    jint keyCode, jint action, jint repeatCount)
 {
     /// Only the initial press matters, the vendor stream also sends releases.
     if (action != 0 /* KeyEvent.ACTION_DOWN */) {
+        return;
+    }
+
+    /// Holding the squeeze gesture auto-repeats, and acting on every repeat would
+    /// toggle a mapped action (the popup palette) on and off again. Measured on
+    /// device: slide gestures never repeat, while the squeeze gesture can.
+    if (repeatCount > 0) {
         return;
     }
 
