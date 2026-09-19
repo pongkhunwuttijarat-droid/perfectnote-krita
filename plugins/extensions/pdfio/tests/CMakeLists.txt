@@ -105,6 +105,26 @@ if (Poppler_Qt${QT_MAJOR_VERSION}_FOUND)
     set_target_properties(PdfExporterTest PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+    add_executable(PdfStripLayoutTest
+        PdfStripLayoutTest.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../session/PdfSessionManifest.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../session/PdfStripLayout.cpp
+        )
+
+    target_include_directories(PdfStripLayoutTest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+    target_link_libraries(PdfStripLayoutTest PRIVATE
+        Qt${QT_MAJOR_VERSION}::Core
+        Qt${QT_MAJOR_VERSION}::Gui
+        Qt${QT_MAJOR_VERSION}::Test)
+
+    set_target_properties(PdfStripLayoutTest PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+    add_test(NAME pdfio-PdfStripLayoutTest COMMAND PdfStripLayoutTest)
+    set_tests_properties(pdfio-PdfStripLayoutTest PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
     add_test(NAME pdfio-PdfExporterTest COMMAND PdfExporterTest)
     set_tests_properties(pdfio-PdfExporterTest PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

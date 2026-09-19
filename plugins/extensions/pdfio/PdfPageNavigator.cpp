@@ -542,6 +542,11 @@ bool PdfPageNavigator::saveCurrentPage(QString *why)
         return false;
     }
 
+    /// The thumbnail of this page has just been rewritten from the ink that was saved, so anything
+    /// showing it -- the page selector -- is told, rather than waiting for the page to be opened
+    /// again before it notices.
+    Q_EMIT thumbnailReady(m_index);
+
     return true;
 }
 

@@ -12,6 +12,7 @@ set(kritapdfio_SOURCES
     session/PdfProjectBuilder.cpp
     session/PdfSession.cpp
     session/PdfSessionManifest.cpp
+    session/PdfStripLayout.cpp
     )
 
 kis_add_library(kritapdfio MODULE ${kritapdfio_SOURCES})
