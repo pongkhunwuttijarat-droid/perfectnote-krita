@@ -22,4 +22,8 @@ if (ANDROID)
     target_link_libraries(kritapdfio PRIVATE Qt${QT_MAJOR_VERSION}::AndroidExtras)
 endif()
 
+if (BUILD_TESTING)
+    add_subdirectory(tests)
+endif()
+
 install(TARGETS kritapdfio DESTINATION ${KRITA_PLUGIN_INSTALL_DIR})
