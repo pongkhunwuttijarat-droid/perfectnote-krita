@@ -107,9 +107,15 @@ PdfIoPlugin::PdfIoPlugin(QObject *parent, const QVariantList &)
     /// the probe the same way is both the fix and a faithful stand-in.
     QTimer::singleShot(0, this, [this, probePath]() {
 #if defined(Q_OS_ANDROID)
-        /// Temporary: on Android the picker is the only way to reach a file the user owns, so the
-        /// probe opens it and the result is what gets verified.
-        slotOpenNotebook();
+        /// Temporary, and deliberately not the picker: this drives the very same open path with a
+        /// file that is already on the device, so the crash reproduces unattended and the step
+        /// logging in the navigator can be read straight out of logcat.
+        const QString fixture = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
+                                    .filePath(QStringLiteral("pdfio-fixture.pdf"));
+        QString why;
+        say(QStringLiteral("opening %1 through the real path").arg(fixture));
+        const bool ok = PdfPageNavigator::instance()->openNotebook(fixture, &why);
+        say(QStringLiteral("openNotebook = %1 (%2)").arg(ok).arg(why));
         return;
 #endif
         const int scale = qEnvironmentVariableIntValue("PDFIO_PROBE_SCALE");

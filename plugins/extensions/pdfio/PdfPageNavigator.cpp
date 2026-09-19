@@ -111,6 +111,8 @@ bool PdfPageNavigator::openNotebook(const QString &pdfPath, QString *why)
         return false;
     }
 
+    say(QStringLiteral("project ready: %1 pages at %2").arg(manifest.pages.size()).arg(projectDir));
+
     m_projectDir = projectDir;
     m_manifest = manifest;
     const bool shown = showPage(0, why);
@@ -155,10 +157,15 @@ bool PdfPageNavigator::showPage(int index, QString *why)
         return false;
     }
 
+    /// Step by step on purpose. Opening a document on Android crashed inside Qt without saying
+    /// where, and these lines are what turned "somewhere after the copy" into a stage.
+    say(QStringLiteral("rendering page %1").arg(index + 1));
+
     KisImageSP image = PdfProjectBuilder::buildPageImage(m_manifest.pages.at(index), *backend, 200.0, why);
     if (!image) {
         return false;
     }
+    say(QStringLiteral("rendered %1x%2 at %3 dpi").arg(image->width()).arg(image->height()).arg(image->xRes()));
 
     KisDocument *document = KisPart::instance()->createDocument();
     document->documentInfo()->setAboutInfo(QStringLiteral("title"),
@@ -166,10 +173,15 @@ bool PdfPageNavigator::showPage(int index, QString *why)
     document->setCurrentImage(image, true, PdfProjectBuilder::inkStrokeLayer(image));
     document->setProperty("pdfioProjectDir", m_projectDir);
     document->setProperty("pdfioPageIndex", m_manifest.pages.at(index).index);
+    say(QStringLiteral("document created, image attached"));
+
     KisPart::instance()->addDocument(document);
+    say(QStringLiteral("document registered"));
 
     KisMainWindow *window = KisPart::instance()->currentMainwindow();
+    say(QStringLiteral("main window %1").arg(window ? "found" : "MISSING"));
     KisView *view = window ? window->addViewAndNotifyLoadingCompleted(document) : nullptr;
+    say(QStringLiteral("view %1").arg(view ? "created" : "NOT created"));
 
     /// Only now, with the new page up, is the old one given back. Closing first would take the
     /// view that is running this very code with it.
