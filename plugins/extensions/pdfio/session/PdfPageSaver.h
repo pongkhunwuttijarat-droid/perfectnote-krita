@@ -43,6 +43,19 @@ public:
     static KisDocument *createInkOnlyDocument(const KisImageSP &source, QString *why = nullptr);
 
     /**
+     * The ink of one region of a document, as a document of that region's own size.
+     *
+     * A strip holds several pages at once, so "the ink of the document" is not a thing there: the
+     * ink of the page that is active is the layers of its own group, cropped to the rectangle that
+     * page occupies in the strip, and shifted back to the origin so the artifact is the page and
+     * nothing about the strip leaks into it.
+     */
+    static KisDocument *createInkOnlyDocument(const KisImageSP &source,
+                                              const QRect &area,
+                                              const QList<KisNodeSP> &inkLayers,
+                                              QString *why = nullptr);
+
+    /**
      * Saves asynchronously through KisDocument::saveAs, which writes no merged image on its own
      * terms but does honour the document contents. Returns false when the save could not start.
      */

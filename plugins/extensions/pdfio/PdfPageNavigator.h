@@ -11,11 +11,16 @@
 /// needs the complete type for its destructor.
 #include "backend/PdfRenderBackend.h"
 #include "session/PdfSessionManifest.h"
+#include "session/PdfStripLayout.h"
 
 #include <QObject>
 #include <QPointer>
 #include <QString>
 #include <QTimer>
+
+#include <QRect>
+
+#include <kis_types.h>
 
 class KisDocument;
 class KisView;
@@ -50,6 +55,16 @@ public:
 
     /// The view showing it, for code that needs the canvas rather than the document.
     KisView *currentView() const;
+
+    /**
+     * How many pages are held at full resolution around the open one.
+     *
+     * One is design A: a document per page, and a page turn rebuilds it. More is design B: a strip
+     * of pages in one document, where turning to a page that is already in the strip is unlocking
+     * its slot rather than building anything. See docs/PDFIO-DESIGN-STRIP.md.
+     */
+    int scope() const;
+    void setScope(int scope);
 
     /**
      * Makes sure the page has a thumbnail, rendering one at thumbnail resolution when it has none.
@@ -120,7 +135,40 @@ private:
     bool m_scrollFollow = true;
     QTimer *m_scrollWatch = nullptr;
 
+    /// How many pages the open document holds at full resolution, and at what resolution.
+    ///
+    /// One until the strip can save a single page out of itself: with several pages in one image,
+    /// saving without cropping would write the whole strip as one page's ink.
+    int m_scope = 1;
+    qreal m_dpi = 200.0;
+
+    /// The pages the open strip holds and where each sits. Empty when the document is a single
+    /// page, which is also how the code tells the two apart.
+    QList<int> m_stripPages;
+    QList<QRect> m_stripRects;
+    int m_stripActiveSlot = -1;
+
     void makeOneThumbnail();
+
+    /**
+     * Opens \a index by building a document for it alone, or for a strip of pages around it.
+     *
+     * A page that is already in the open strip needs neither: activateWithinStrip unlocks its slot
+     * and asks for it, which is the difference between a page turn that costs 650 ms and one that
+     * costs nothing. The 650 ms is mostly the document and the view, measured on the tablet, and
+     * the strip exists to not pay it.
+     */
+    bool buildForSinglePage(int index, QString *why);
+    bool buildForStrip(int index, QString *why);
+    bool activateWithinStrip(int index, QString *why);
+
+    /// Creates the document, its view and the strip decoration, and gives the page that was open
+    /// back to the event loop. Shared by both ways of opening one.
+    bool showImage(KisImageSP image, KisNodeSP activeNode, int index,
+                   const PdfStripLayout &layout, QString *why);
+
+    /// Locks every slot of the strip but one, so only the active page can be drawn on.
+    void lockSlotsBut(int activeSlot, int oldActiveSlot);
 
     QList<int> m_thumbnailQueue;
     QTimer *m_thumbnailTimer = nullptr;

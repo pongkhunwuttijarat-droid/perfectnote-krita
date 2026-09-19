@@ -30,10 +30,11 @@ void fail(QString *why, const QString &message)
  * deliberate first cut: the ink a note is made of is paint, and anything Krita-specific that
  * cannot be reproduced is better rejected loudly later than flattened silently now.
  */
-void copyInkLayers(KisImageSP target, KisNodeSP inkGroup, KisNodeSP parent)
+void copyInkLayers(KisImageSP target, const QList<KisNodeSP> &layers, const QRect &area, KisNodeSP parent)
 {
-    for (quint32 i = 0; i < inkGroup->childCount(); ++i) {
-        KisNodeSP child = inkGroup->at(i);
+    /// By value, not by const reference: qobject_cast refuses to cast away constness, and a shared
+    /// pointer copy costs nothing.
+    for (KisNodeSP child : layers) {
         KisPaintLayer *paint = qobject_cast<KisPaintLayer *>(child.data());
         if (!paint) {
             continue;
@@ -41,6 +42,12 @@ void copyInkLayers(KisImageSP target, KisNodeSP inkGroup, KisNodeSP parent)
 
         KisPaintLayerSP copy = new KisPaintLayer(target, paint->name(), paint->opacity());
         copy->paintDevice()->makeCloneFrom(paint->paintDevice(), paint->paintDevice()->extent());
+
+        /// Shifted so the region's top left becomes the origin, which is what makes an artifact of
+        /// a page inside a strip identical to one of a page on its own.
+        copy->setX(-area.x());
+        copy->setY(-area.y());
+
         target->addNode(copy, parent);
     }
 }
@@ -65,14 +72,39 @@ KisDocument *PdfPageSaver::createInkOnlyDocument(const KisImageSP &source, QStri
         return nullptr;
     }
 
+    QList<KisNodeSP> layers;
+    for (quint32 i = 0; i < inkGroup->childCount(); ++i) {
+        layers.append(inkGroup->at(i));
+    }
+
+    return createInkOnlyDocument(source, QRect(0, 0, source->width(), source->height()),
+                                 layers, why);
+}
+
+KisDocument *PdfPageSaver::createInkOnlyDocument(const KisImageSP &source,
+                                                 const QRect &area,
+                                                 const QList<KisNodeSP> &inkLayers,
+                                                 QString *why)
+{
+    if (!source) {
+        fail(why, QStringLiteral("no page image to save"));
+        return nullptr;
+    }
+
+    if (area.isEmpty()) {
+        fail(why, QStringLiteral("the page has no area to save"));
+        return nullptr;
+    }
+
     KisDocument *document = KisPart::instance()->createDocument();
 
+    /// The artifact is the size of the page, not of whatever document the page happened to live in.
     KisImageSP inkOnly = new KisImage(document->createUndoStore(),
-                                      source->width(), source->height(), source->colorSpace(),
+                                      area.width(), area.height(), source->colorSpace(),
                                       QStringLiteral("ink"));
     inkOnly->setResolution(source->xRes(), source->yRes());
 
-    copyInkLayers(inkOnly, inkGroup, inkOnly->rootLayer());
+    copyInkLayers(inkOnly, inkLayers, area, inkOnly->rootLayer());
     document->setCurrentImage(inkOnly, false);
 
     return document;

@@ -17,6 +17,7 @@
 
 #include "backend/PdfRenderBackend.h"
 #include "PdfPageStripDecoration.h"
+#include "session/PdfStripBuilder.h"
 #include "session/PdfInkLoader.h"
 #include "session/PdfPageSaver.h"
 #include "session/PdfProjectBuilder.h"
@@ -30,8 +31,11 @@
 #include <kis_canvas2.h>
 #include <kis_coordinates_converter.h>
 
+#include <kis_node_manager.h>
+
 #include <KisDocument.h>
 #include <KisMainWindow.h>
+#include <KisViewManager.h>
 #include <KisPart.h>
 #include <KisView.h>
 
@@ -384,6 +388,121 @@ void PdfPageNavigator::closeCurrentPage()
     }
 }
 
+bool PdfPageNavigator::buildForStrip(int index, QString *why)
+{
+    QScopedPointer<PdfRenderBackend> backend(PdfRenderBackend::create());
+    if (!backend || !backend->open(sourcePath())) {
+        fail(why, QStringLiteral("the renderer cannot open the source"));
+        return false;
+    }
+
+    say(QStringLiteral("building a strip of %1 around page %2").arg(m_scope).arg(index + 1));
+    const PdfStripBuilder::Strip strip = PdfStripBuilder::build(m_manifest, index, m_scope, m_dpi,
+                                                                *backend, m_projectDir, why);
+    if (!strip.image) {
+        return false;
+    }
+
+    QList<int> pages;
+    for (const PdfStripLayout::Slot &slot : strip.layout.slots()) {
+        pages.append(slot.page);
+    }
+    say(QStringLiteral("strip holds pages %1").arg(
+        [&pages]() {
+            QStringList names;
+            for (int page : pages) {
+                names.append(page < 0 ? QStringLiteral("-") : QString::number(page + 1));
+            }
+            return names.join(QLatin1Char(','));
+        }()));
+
+    Q_UNUSED(pages);
+    return showImage(strip.image, strip.activeInkLayer, index, strip.layout, why);
+}
+
+bool PdfPageNavigator::activateWithinStrip(int index, QString *why)
+{
+    if (m_stripPages.isEmpty() || !m_document || !m_document->image()) {
+        fail(why, QStringLiteral("no strip is open"));
+        return false;
+    }
+
+    const int slot = m_stripPages.indexOf(index);
+    if (slot < 0) {
+        fail(why, QStringLiteral("page %1 is not in the strip").arg(index + 1));
+        return false;
+    }
+
+    lockSlotsBut(slot, m_stripActiveSlot);
+
+    /// And make it the node Krita is working on, so the brush goes to this page and the layer
+    /// docker shows it. This is the same call the crash stack went through, reached deliberately
+    /// rather than by accident.
+    KisImageSP image = m_document->image();
+    KisNodeSP layer;
+    for (quint32 i = 0; i < image->root()->childCount(); ++i) {
+        KisNodeSP child = image->root()->at(i);
+        if (child->name() == PdfStripBuilder::inkGroupName(index) && child->childCount() > 0) {
+            layer = child->at(0);
+            break;
+        }
+    }
+
+    if (layer && m_view && m_view->viewManager() && m_view->viewManager()->nodeManager()) {
+        m_view->viewManager()->nodeManager()->slotNonUiActivatedNode(layer);
+    }
+
+    m_stripActiveSlot = slot;
+    m_index = index;
+
+    say(QStringLiteral("page %1 is now the active slot of the strip").arg(index + 1));
+    Q_EMIT pageChanged(m_index, pageCount(), QFileInfo(m_manifest.sourceFile).completeBaseName());
+    ensureThumbnail(index - 1);
+    ensureThumbnail(index + 1);
+    return true;
+}
+
+void PdfPageNavigator::lockSlotsBut(int activeSlot, int oldActiveSlot)
+{
+    Q_UNUSED(oldActiveSlot);
+
+    if (!m_document || !m_document->image()) {
+        return;
+    }
+
+    KisImageSP image = m_document->image();
+    for (int slot = 0; slot < m_stripPages.size(); ++slot) {
+        const int page = m_stripPages.at(slot);
+        if (page < 0) {
+            continue;
+        }
+
+        const bool active = (slot == activeSlot);
+
+        for (quint32 i = 0; i < image->root()->childCount(); ++i) {
+            KisNodeSP child = image->root()->at(i);
+            if (child->name() != PdfStripBuilder::inkGroupName(page)) {
+                continue;
+            }
+
+            child->setUserLocked(!active);
+            for (quint32 c = 0; c < child->childCount(); ++c) {
+                child->at(c)->setUserLocked(!active);
+            }
+        }
+    }
+}
+
+int PdfPageNavigator::scope() const
+{
+    return m_scope;
+}
+
+void PdfPageNavigator::setScope(int scope)
+{
+    m_scope = qMax(1, scope);
+}
+
 bool PdfPageNavigator::showPage(int index, QString *why)
 {
     if (!hasNotebook()) {
@@ -395,6 +514,26 @@ bool PdfPageNavigator::showPage(int index, QString *why)
         return false;
     }
 
+    /// A page that is already inside the open strip costs nothing to reach: no renderer, no
+    /// document, no view. Unlocking its slot and asking for it is the whole point of design B --
+    /// the 650 ms a page turn costs is almost all document and view, measured on the tablet.
+    if (m_document && m_stripPages.contains(index)) {
+        return activateWithinStrip(index, why);
+    }
+
+    /// Anything else leaves the page that is open, and that page is written before it goes.
+    if (m_document && m_document->image() && m_index != index) {
+        QString saveError;
+        if (!saveCurrentPage(&saveError)) {
+            say(QStringLiteral("could not save the page being left: %1").arg(saveError));
+        }
+    }
+
+    return m_scope > 1 ? buildForStrip(index, why) : buildForSinglePage(index, why);
+}
+
+bool PdfPageNavigator::buildForSinglePage(int index, QString *why)
+{
     QScopedPointer<PdfRenderBackend> backend(PdfRenderBackend::create());
     if (!backend) {
         fail(why, QStringLiteral("no PDF render backend on this platform"));
@@ -430,10 +569,18 @@ bool PdfPageNavigator::showPage(int index, QString *why)
         }
     }
 
+    return showImage(image, PdfProjectBuilder::inkStrokeLayer(image), index, PdfStripLayout(), why);
+}
+
+bool PdfPageNavigator::showImage(KisImageSP image, KisNodeSP activeNode, int index,
+                                 const PdfStripLayout &layout, QString *why)
+{
+    Q_UNUSED(why);
+
     KisDocument *document = KisPart::instance()->createDocument();
     document->documentInfo()->setAboutInfo(QStringLiteral("title"),
                                            QFileInfo(m_manifest.sourceFile).completeBaseName());
-    document->setCurrentImage(image, true, PdfProjectBuilder::inkStrokeLayer(image));
+    document->setCurrentImage(image, true, activeNode);
     document->setProperty("pdfioProjectDir", m_projectDir);
     document->setProperty("pdfioPageIndex", m_manifest.pages.at(index).index);
     say(QStringLiteral("document created, image attached"));
@@ -459,18 +606,16 @@ bool PdfPageNavigator::showPage(int index, QString *why)
     const QPointer<KisDocument> previousDocument = m_document;
     const QPointer<KisView> previousView = m_view;
 
-    /// The page being left is written before it is closed. This used to be missing, and turning a
-    /// page threw the ink away: the document was removed and nothing had ever been saved from it.
-    if (previousDocument && previousDocument->image()) {
-        QString saveError;
-        if (!saveCurrentPage(&saveError)) {
-            say(QStringLiteral("could not save the page being left: %1").arg(saveError));
-        }
-    }
-
     m_document = document;
     m_view = view;
     m_index = index;
+    m_stripPages.clear();
+    m_stripRects.clear();
+    for (const PdfStripLayout::Slot &slot : layout.slots()) {
+        m_stripPages.append(slot.page);
+        m_stripRects.append(slot.rect);
+    }
+    m_stripActiveSlot = layout.isValid() ? layout.activeSlot() : -1;
 
     /// Closed on the next turn of the event loop rather than right here. Closing a view and
     /// removing its document re-enters the window layout, and doing that inside the call that is
@@ -512,13 +657,40 @@ bool PdfPageNavigator::saveCurrentPage(QString *why)
         return true;
     }
 
+    /// What belongs to the page that is open. In a strip, that is the page's own group cropped to
+    /// its own rectangle; in a document that holds one page it is everything, and no cropping is
+    /// needed. Without this a save would write the whole strip as one page's ink.
+    QRect pageArea;
+    QList<KisNodeSP> inkLayers;
+    if (!m_stripPages.isEmpty() && m_stripActiveSlot >= 0
+        && m_stripActiveSlot < m_stripRects.size()) {
+        pageArea = m_stripRects.at(m_stripActiveSlot);
+
+        for (quint32 i = 0; i < m_document->image()->root()->childCount(); ++i) {
+            KisNodeSP child = m_document->image()->root()->at(i);
+            if (child->name() != PdfStripBuilder::inkGroupName(m_index)) {
+                continue;
+            }
+            for (quint32 c = 0; c < child->childCount(); ++c) {
+                inkLayers.append(child->at(c));
+            }
+            break;
+        }
+    }
+
+    const QRect thumbArea = pageArea.isValid()
+        ? pageArea
+        : QRect(0, 0, m_document->image()->width(), m_document->image()->height());
+
     /// A thumbnail of the page as it looks, ink included, so the docker can show what each page
     /// holds without opening it. A thumbnail is a scaled copy, not a document, which is the whole
     /// reason this is affordable and rendering neighbouring pages is not.
     const QDir project(m_projectDir);
     const QString thumbPath = project.filePath(m_manifest.pages.at(m_index).thumbFile);
     if (KisPaintDeviceSP projection = m_document->image()->projection()) {
-        const QImage thumb = projection->createThumbnail(256, 256);
+        /// Of the page's own rectangle, or a strip's thumbnail would be a picture of the strip.
+        const QImage thumb =
+            projection->createThumbnailUncached(ThumbnailPixels, ThumbnailPixels, thumbArea);
         if (!thumb.isNull()) {
             QDir().mkpath(QFileInfo(thumbPath).absolutePath());
             thumb.save(thumbPath, "PNG");
@@ -527,7 +699,12 @@ bool PdfPageNavigator::saveCurrentPage(QString *why)
 
     /// The copy is made while the page is still alive, and it owns its own pixels, so the editing
     /// document can be closed immediately afterwards.
-    KisDocument *inkOnly = PdfPageSaver::createInkOnlyDocument(m_document->image(), why);
+    KisDocument *inkOnly = nullptr;
+    if (pageArea.isValid() && !inkLayers.isEmpty()) {
+        inkOnly = PdfPageSaver::createInkOnlyDocument(m_document->image(), pageArea, inkLayers, why);
+    } else {
+        inkOnly = PdfPageSaver::createInkOnlyDocument(m_document->image(), why);
+    }
     if (!inkOnly) {
         return false;
     }
