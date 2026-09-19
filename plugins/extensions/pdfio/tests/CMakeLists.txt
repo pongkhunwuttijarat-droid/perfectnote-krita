@@ -105,21 +105,9 @@ if (Poppler_Qt${QT_MAJOR_VERSION}_FOUND)
     set_target_properties(PdfExporterTest PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-    # Not registered yet: the two structural tests pass (the page tree walk returns 3, 5, 7 and
-    # object streams are refused) but the export itself produces a malformed incremental update.
-    # Poppler reports, at the appended region:
-    #
-    #   Error (1465): Dictionary key must be a name object
-    #   Error: End of file inside array
-    #   Error: End of file inside dictionary
-    #   Error: Weird page contents
-    #
-    # so /Contents and the /Resources merge need another pass before this can be a gate. The
-    # binary is kept and can be run by hand:
-    #   ./bin/PdfExporterTest
-    # add_test(NAME pdfio-PdfExporterTest COMMAND PdfExporterTest)
-    # set_tests_properties(pdfio-PdfExporterTest PROPERTIES
-    #     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_test(NAME pdfio-PdfExporterTest COMMAND PdfExporterTest)
+    set_tests_properties(pdfio-PdfExporterTest PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
     # PdfPageSaver is deliberately not covered here: KraConverter and KisPart want the full
     # application environment (resource servers, document storage), and a bare QTest hung

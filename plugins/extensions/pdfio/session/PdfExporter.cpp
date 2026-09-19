@@ -319,7 +319,8 @@ bool PdfExporter::exportWithInk(const QString &sourcePdf,
         /// Draw the ink over the page, in the page's own user space.
         const double widthPt = x1 - x0;
         const double heightPt = y1 - y0;
-        QByteArray content = "q" + QByteArray::number(widthPt, 'f', 4) + " 0 0 "
+        /// "q " and not "q": without the separator the parser reads "q595.0000" as one token.
+        QByteArray content = "q " + QByteArray::number(widthPt, 'f', 4) + " 0 0 "
                              + QByteArray::number(heightPt, 'f', 4) + " "
                              + QByteArray::number(x0, 'f', 4) + " "
                              + QByteArray::number(y0, 'f', 4) + " cm /pdfioInk Do Q" + NL;
@@ -338,25 +339,31 @@ bool PdfExporter::exportWithInk(const QString &sourcePdf,
         }
 
         const int valueStart = contentsAt + 9;
-        int valueEnd = valueStart;
-        if (replaced.mid(valueStart, 1) == "[") {
-            valueEnd = replaced.indexOf(']', valueStart) + 1;
-        } else {
-            while (valueEnd < replaced.size()
-                   && (replaced.at(valueEnd) == ' '
-                       || (replaced.at(valueEnd) >= '0' && replaced.at(valueEnd) <= '9'))) {
-                ++valueEnd;
-            }
-            /// Consume the object reference tail: "N 0 R".
-            const int rAt = replaced.indexOf(" R", valueEnd);
-            valueEnd = rAt >= 0 ? rAt + 2 : valueEnd;
+        const QString tail = QString::fromLatin1(replaced.mid(valueStart, 64));
+
+        /// Either an array of references or a single one, matched against the tail rather than
+        /// walked byte by byte. The byte walk this replaced treated a space as part of the value,
+        /// ran past "4 0 R" and onto the next dictionary key, and produced a page object that
+        /// Poppler rejected as a dictionary key that is not a name.
+        static const QRegularExpression arrayRe(QStringLiteral("^(\\s*\\[[^\\]]*\\])"));
+        static const QRegularExpression refRe(QStringLiteral("^(\\s*\\d+\\s+0\\s+R)"));
+
+        const QRegularExpressionMatch arrayMatch = arrayRe.match(tail);
+        const QRegularExpressionMatch refMatch = refRe.match(tail);
+        if (!arrayMatch.hasMatch() && !refMatch.hasMatch()) {
+            fail(why, QStringLiteral("page %1 has an unreadable /Contents").arg(i + 1));
+            return false;
         }
-        const QByteArray originalContents = replaced.mid(valueStart, valueEnd - valueStart);
-        QByteArray list = originalContents.startsWith("[")
-                              ? originalContents.left(originalContents.size() - 1)
-                              : QByteArray("[") + originalContents;
+
+        /// The capture keeps the leading whitespace, so it can be replaced in place.
+        const QByteArray captured = (arrayMatch.hasMatch() ? arrayMatch.captured(1)
+                                                           : refMatch.captured(1)).toLatin1();
+        const QByteArray value = captured.trimmed();
+
+        QByteArray list = value.startsWith('[') ? value.left(value.size() - 1)
+                                                : QByteArray("[") + value;
         list += " " + QByteArray::number(contentNumber) + " 0 R ]";
-        replaced.replace(valueStart, valueEnd - valueStart, list);
+        replaced.replace(valueStart, captured.size(), list);
 
         /// The drawing operator needs a name in the page's resources.
         const int resourcesAt = replaced.indexOf("/Resources");

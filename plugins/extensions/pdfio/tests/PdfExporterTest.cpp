@@ -168,7 +168,7 @@ void PdfExporterTest::testSourceTextSurvives()
     /// No original object is rewritten, so the text has to still be selectable.
     const QString text = exported.pageText(0);
     QVERIFY2(text.contains(QStringLiteral("Page one heading")), qPrintable(text));
-    QVERIFY2(text.contains(QStringLiteral("quick brown fox")), qPrintable(text));
+    QVERIFY2(text.contains(QStringLiteral("Plain A4 page.")), qPrintable(text));
 }
 
 QTEST_MAIN(PdfExporterTest)
