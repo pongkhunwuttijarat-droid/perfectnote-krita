@@ -384,6 +384,15 @@ void PdfIoPlugin::runRestoreProbe()
     PdfPageNavigator *navigator = PdfPageNavigator::instance();
     QString why;
 
+    /// The docker is put up first, because the crash being chased happened with it visible and a
+    /// page clicked in it. Without it the probe is not reproducing the same thing.
+    if (KisMainWindow *window = KisPart::instance()->currentMainwindow()) {
+        auto *docker = new PdfIoDocker();
+        window->addDockWidget(Qt::RightDockWidgetArea, docker);
+        docker->show();
+        say(QStringLiteral("restore: the notebook docker is up"));
+    }
+
     if (!navigator->openNotebook(qEnvironmentVariable("PDFIO_PROBE"), &why)) {
         say(QStringLiteral("restore: cannot open the notebook: %1").arg(why));
         return;

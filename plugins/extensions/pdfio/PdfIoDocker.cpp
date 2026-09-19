@@ -9,6 +9,8 @@
 
 #include <QDir>
 #include <QFileInfo>
+#include <QSignalBlocker>
+#include <QTimer>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
@@ -110,6 +112,9 @@ void PdfIoDocker::refresh(int index, int pageCount, const QString &label)
     /// fresh icon: a page saves its thumbnail on the way out, so by the time this runs the page
     /// that was left behind has one and the list should show it.
     if (m_pages->count() != pageCount) {
+        /// Blocked while the list is rebuilt: clearing it destroys the very item a click may be
+        /// arriving from, and the widget must not be told about that from inside its own signal.
+        const QSignalBlocker blocker(m_pages);
         m_pages->clear();
         for (int i = 0; i < pageCount; ++i) {
             m_pages->addItem(new QListWidgetItem(pageLabel(i)));
@@ -183,8 +188,17 @@ void PdfIoDocker::openSelected()
         return;
     }
 
-    QString why;
-    PdfPageNavigator::instance()->showPage(row, &why);
+    /// Deferred out of the click handler, and this is not tidiness. Opening a page builds a
+    /// document and a view and asks Krita to activate a node, so the whole application reacts
+    /// while the list widget is still inside its own signal for the item that was clicked.
+    /// Deferring this exact kind of work has already fixed three other hangs and crashes here: the
+    /// plugin constructor, the Android activity result callback, and the view close.
+    QTimer::singleShot(0, this, [row]() {
+        QString why;
+        if (!PdfPageNavigator::instance()->showPage(row, &why)) {
+            qWarning() << "pdfio: cannot open that page:" << why;
+        }
+    });
 }
 
 void registerPdfIoDocker()

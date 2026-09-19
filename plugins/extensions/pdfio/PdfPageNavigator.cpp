@@ -482,6 +482,12 @@ bool PdfPageNavigator::showPage(int index, QString *why)
         });
     }
 
+    /// The pages either side are drawn by the strip decoration, and it can only draw what has been
+    /// rendered. Asking here means the neighbours fill in as the page is opened, rather than only
+    /// once the page selector has been scrolled.
+    ensureThumbnail(index - 1);
+    ensureThumbnail(index + 1);
+
     say(QStringLiteral("page %1 of %2 open").arg(index + 1).arg(m_manifest.pages.size()));
     Q_EMIT pageChanged(m_index, pageCount(), QFileInfo(m_manifest.sourceFile).completeBaseName());
     return true;
