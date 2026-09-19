@@ -31,6 +31,8 @@
 #include <kis_canvas2.h>
 #include <kis_coordinates_converter.h>
 
+#include <KoZoomMode.h>
+#include <kis_canvas_controller.h>
 #include <kis_node_manager.h>
 
 #include <KisDocument.h>
@@ -452,6 +454,13 @@ bool PdfPageNavigator::activateWithinStrip(int index, QString *why)
         m_view->viewManager()->nodeManager()->slotNonUiActivatedNode(layer);
     }
 
+    /// And show it. A strip holds several pages in one image, so making another page active does
+    /// not move the view by itself: without this the page that just became active is the one the
+    /// user cannot see, and the one they can see is a locked neighbour that refuses their strokes.
+    if (m_view && m_view->canvasController() && slot < m_stripRects.size()) {
+        m_view->canvasController()->ensureVisibleDoc(QRectF(m_stripRects.at(slot)), true);
+    }
+
     m_stripActiveSlot = slot;
     m_index = index;
 
@@ -601,6 +610,21 @@ bool PdfPageNavigator::showImage(KisImageSP image, KisNodeSP activeNode, int ind
         && !view->canvasBase()->decoration(QStringLiteral("pdfioPageStrip"))) {
         view->canvasBase()->addDecoration(
             KisCanvasDecorationSP(new PdfPageStripDecoration(QStringLiteral("pdfioPageStrip"), view)));
+    }
+
+    /// Fitted to width, not to the document. A strip is several pages tall, so a view fitted to the
+    /// whole document shows every page at once and each of them far too small to read -- which is
+    /// what "it is not full screen" looked like. Fitting the width makes a page fill the window,
+    /// and the view is then moved to whichever page is active.
+    ///
+    /// Deferred, because the view has not been laid out yet the moment it is created.
+    if (layout.isValid() && view) {
+        const QPointer<KisView> viewGuard = view;
+        QTimer::singleShot(400, this, [viewGuard]() {
+            if (viewGuard && viewGuard->canvasController()) {
+                viewGuard->canvasController()->setZoom(KoZoomMode::ZOOM_WIDTH, 1.0);
+            }
+        });
     }
 
     /// Only now, with the new page up, is the old one given back. Closing first would take the

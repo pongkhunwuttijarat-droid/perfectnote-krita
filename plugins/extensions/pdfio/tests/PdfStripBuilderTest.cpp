@@ -9,6 +9,8 @@
 
 #include <QtTest>
 
+#include <limits>
+
 #include <kis_group_layer.h>
 #include <kis_image.h>
 #include <kis_paint_device.h>
@@ -29,6 +31,7 @@ private Q_SLOTS:
     void testEverySlotHasAPageAndAnInkGroup();
     void testOnlyTheActiveSlotIsUnlocked();
     void testPagesAreWhereTheLayoutSays();
+    void testPaperIsBelowEveryInkGroup();
 
 private:
     QString fixturePath() const
@@ -87,8 +90,9 @@ void PdfStripBuilderTest::testEverySlotHasAPageAndAnInkGroup()
                                                                backend, QString(), &why);
     QVERIFY2(strip.image, qPrintable(why));
 
-    /// Three pages: three backgrounds and three ink groups, and nothing else at the top.
-    QCOMPARE(strip.image->root()->childCount(), 6u);
+    /// Three pages: three backgrounds, three ink groups, and the desk underneath them all.
+    QCOMPARE(strip.image->root()->childCount(), 7u);
+    QCOMPARE(strip.image->root()->at(0)->name(), QStringLiteral("Desk"));
 
     for (const PdfStripLayout::Slot &slot : strip.layout.slots()) {
         QVERIFY(slot.page >= 0);
@@ -160,6 +164,46 @@ void PdfStripBuilderTest::testPagesAreWhereTheLayoutSays()
         QCOMPARE(bounds.top(), slot.rect.top());
         QCOMPARE(bounds.left(), slot.rect.left());
     }
+}
+
+void PdfStripBuilderTest::testPaperIsBelowEveryInkGroup()
+{
+    PopplerRenderBackend backend;
+    QVERIFY(backend.open(fixturePath()));
+
+    QString why;
+    const PdfStripBuilder::Strip strip = PdfStripBuilder::build(manifestFor(backend), 1, 3, 200.0,
+                                                               backend, QString(), &why);
+    QVERIFY2(strip.image, qPrintable(why));
+
+    /// All of the paper first, then all of the ink. Adding a slot at a time puts the next page's
+    /// paper above this page's ink, and a stroke that strays outside its own page disappears behind
+    /// the page below it -- reported exactly as "the active page did not change", because the
+    /// stroke was there and hidden.
+    int lowestInk = std::numeric_limits<int>::max();
+    int highestPaper = -1;
+
+    KisNodeSP root = strip.image->root();
+    for (quint32 i = 0; i < root->childCount(); ++i) {
+        const QString name = root->at(i)->name();
+        const int index = int(i);
+
+        if (name == QStringLiteral("Desk")) {
+            continue;
+        }
+
+        const bool isInk = qobject_cast<KisGroupLayer *>(root->at(i).data()) != nullptr;
+        if (isInk) {
+            lowestInk = qMin(lowestInk, index);
+        } else {
+            highestPaper = qMax(highestPaper, index);
+        }
+    }
+
+    QVERIFY(lowestInk != std::numeric_limits<int>::max());
+    QVERIFY(highestPaper >= 0);
+    QVERIFY2(lowestInk > highestPaper,
+             "every ink group has to sit above every page, or ink vanishes behind the next page");
 }
 
 QTEST_MAIN(PdfStripBuilderTest)

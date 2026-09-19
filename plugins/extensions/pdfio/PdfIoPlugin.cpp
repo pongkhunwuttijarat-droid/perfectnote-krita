@@ -52,6 +52,7 @@
 #include <KisMainWindow.h>
 #include <KisPart.h>
 #include <KisViewManager.h>
+#include <kis_node_manager.h>
 #include <kis_action.h>
 #include <kis_action_manager.h>
 #include <klocalizedstring.h>
@@ -594,7 +595,20 @@ void PdfIoPlugin::runStripProbe()
     say(QStringLiteral("strip: drew at %1,%2 in the strip, which is the page's 100,100")
             .arg(area.x() + 100).arg(area.y() + 100));
 
-    QTimer::singleShot(700, this, [this, navigator, first]() {
+    /// Where a stroke would go. Reported before and after every turn, because "the active page did
+    /// not change" is exactly what it looks like when this does not move.
+    auto activeNodeName = [navigator]() {
+        KisView *view = navigator->currentView();
+        if (!view || !view->viewManager() || !view->viewManager()->nodeManager()) {
+            return QStringLiteral("(no node manager)");
+        }
+        KisNodeSP node = view->viewManager()->nodeManager()->activeNode();
+        return node ? node->name() : QStringLiteral("(none)");
+    };
+
+    say(QStringLiteral("strip: active node before any turn is \"%1\"").arg(activeNodeName()));
+
+    QTimer::singleShot(700, this, [this, navigator, first, activeNodeName]() {
         QString why;
         say(QStringLiteral("strip: turning forward"));
         if (!navigator->next(&why)) {
@@ -602,7 +616,10 @@ void PdfIoPlugin::runStripProbe()
             return;
         }
 
-        QTimer::singleShot(700, this, [this, navigator, first]() {
+        say(QStringLiteral("strip: active node after turning forward is \"%1\"")
+                .arg(activeNodeName()));
+
+        QTimer::singleShot(700, this, [this, navigator, first, activeNodeName]() {
             QString why;
             say(QStringLiteral("strip: turning back"));
             if (!navigator->previous(&why)) {

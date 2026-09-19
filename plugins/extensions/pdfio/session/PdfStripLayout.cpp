@@ -79,9 +79,12 @@ PdfStripLayout PdfStripLayout::forWindow(const PdfSessionManifest &manifest,
             ? pageSizeInPixels(manifest, manifest.pages.at(slot.page), dpi)
             : QSize();
 
-        /// Centred horizontally inside the cell, at the top of it.
+        /// Centred in its cell, both ways. Top aligned looked like a mistake: a smaller page sat
+        /// against the top of a cell sized for the largest page in the notebook, with a stretch of
+        /// empty strip under it that reads as the page being wrong rather than as room.
         const int x = (cell.width() - pageSize.width()) / 2;
-        slot.rect = QRect(x, i * (cell.height() + SlotGap), pageSize.width(), pageSize.height());
+        const int y = i * (cell.height() + SlotGap) + (cell.height() - pageSize.height()) / 2;
+        slot.rect = QRect(x, y, pageSize.width(), pageSize.height());
 
         if (slot.page == activePage) {
             layout.m_activeSlot = i;

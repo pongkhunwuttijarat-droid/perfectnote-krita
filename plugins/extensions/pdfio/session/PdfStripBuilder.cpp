@@ -9,6 +9,8 @@
 #include "backend/PdfRenderBackend.h"
 #include "session/PdfInkLoader.h"
 
+#include <QColor>
+#include <QDebug>
 #include <QDir>
 
 #include <kis_group_layer.h>
@@ -81,9 +83,46 @@ PdfStripBuilder::Strip PdfStripBuilder::build(const PdfSessionManifest &manifest
     strip.image->setResolution(dpi, dpi);
     strip.layout = layout;
 
+    /// A base under everything, so the strip reads as pages on a desk. Left transparent, the room
+    /// around a page smaller than the largest one shows Krita's transparency checkerboard, which
+    /// reads as a mistake rather than as room -- which is exactly how it was reported.
+    KisPaintLayerSP desk = new KisPaintLayer(strip.image, QStringLiteral("Desk"), OPACITY_OPAQUE_U8);
+    desk->paintDevice()->fill(QRect(QPoint(0, 0), layout.imageSize()),
+                              KoColor(QColor(96, 96, 96), colorSpace));
+    desk->setUserLocked(true);
+    strip.image->addNode(desk, strip.image->root());
+
     const QDir project(projectDir);
     const QList<PdfStripLayout::Slot> slots = layout.slots();
 
+    /// Paper first, all of it, and only then the ink, all of it. Adding a slot at a time puts the
+    /// next page's paper above this page's ink, so a stroke that strays outside its own page
+    /// disappears behind the page below it -- which is how "the active page did not change" was
+    /// reported: the stroke was there, and hidden.
+    for (const PdfStripLayout::Slot &slot : slots) {
+        if (slot.page < 0) {
+            continue;
+        }
+
+        const QImage rendered = backend.renderPage(slot.page, dpi);
+        KisPaintLayerSP background =
+            new KisPaintLayer(strip.image, backgroundLayerName(slot.page), OPACITY_OPAQUE_U8);
+        if (!rendered.isNull()) {
+            /// Said out loud when it happens: the slot was sized from the page's own geometry, and
+            /// if the renderer disagrees the page is drawn in the wrong place. Deriving a raster
+            /// size instead of asking the renderer is a mistake this project has already made.
+            if (rendered.size() != slot.rect.size()) {
+                qWarning() << "[pdfio] page" << (slot.page + 1) << "rendered at" << rendered.size()
+                           << "but the layout made room for" << slot.rect.size();
+            }
+            background->paintDevice()->convertFromQImage(rendered, nullptr,
+                                                         slot.rect.x(), slot.rect.y());
+        }
+        background->setUserLocked(true);
+        strip.image->addNode(background, strip.image->root());
+    }
+
+    /// And then the ink of every page, above all of the paper.
     for (int i = 0; i < slots.size(); ++i) {
         const PdfStripLayout::Slot &slot = slots.at(i);
         if (slot.page < 0) {
@@ -92,17 +131,7 @@ PdfStripBuilder::Strip PdfStripBuilder::build(const PdfSessionManifest &manifest
 
         const bool active = (i == layout.activeSlot());
 
-        /// The page itself, as a locked layer. Drawn at the slot's own place in the strip.
-        const QImage rendered = backend.renderPage(slot.page, dpi);
-        KisPaintLayerSP background =
-            new KisPaintLayer(strip.image, backgroundLayerName(slot.page), OPACITY_OPAQUE_U8);
-        if (!rendered.isNull()) {
-            background->paintDevice()->convertFromQImage(rendered, nullptr,
-                                                         slot.rect.x(), slot.rect.y());
-        }
-        background->setUserLocked(true);
-
-        /// The ink of this page: restored if it has been drawn on before, blank if not.
+        /// Restored if the page has been drawn on before, blank if not.
         KisGroupLayerSP ink =
             new KisGroupLayer(strip.image, inkGroupName(slot.page), OPACITY_OPAQUE_U8, colorSpace);
         KisPaintLayerSP stroke = new KisPaintLayer(strip.image, inkLayerName(slot.page),
@@ -120,7 +149,6 @@ PdfStripBuilder::Strip PdfStripBuilder::build(const PdfSessionManifest &manifest
         ink->setUserLocked(!active);
         stroke->setUserLocked(!active);
 
-        strip.image->addNode(background, strip.image->root());
         strip.image->addNode(ink, strip.image->root());
         strip.image->addNode(stroke, ink);
 
