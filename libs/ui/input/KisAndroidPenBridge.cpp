@@ -1,10 +1,10 @@
 /*
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * Receives stylus gesture keys captured by the Android activity and maps them
- * onto the remappable stylus actions provided by the S-Pen settings extension.
- * The actions themselves are ordinary Krita actions, so the user can rebind each
- * gesture to any action through the existing stylus settings configuration.
+ * Receives stylus gesture keys captured by the Android activity and maps them onto the
+ * remappable stylus actions provided by the "Pen" extension (plugins/extensions/pensettings).
+ * The actions themselves are ordinary Krita actions, so each gesture can be rebound to any
+ * action from the Pen page of the preferences, which is the mobile equivalent of a shortcut.
  */
 
 #include <QAction>
@@ -102,6 +102,8 @@ Java_org_krita_android_JNIWrappers_stylusGestureKey(JNIEnv * /*env*/, jobject /*
     if (action != 0 /* KeyEvent.ACTION_DOWN */) {
         return;
     }
+
+    qDebug() << "[pen] gesture key" << keyCode << "repeat" << repeatCount;
 
     /// Holding the squeeze gesture auto-repeats, and acting on every repeat would
     /// toggle a mapped action (the popup palette) on and off again. Measured on
