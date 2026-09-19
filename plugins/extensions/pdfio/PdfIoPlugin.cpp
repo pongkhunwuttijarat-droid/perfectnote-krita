@@ -23,8 +23,14 @@
 #include <QTimer>
 
 #if defined(PDFIO_HAVE_POPPLER)
+#include "session/PdfExporter.h"
+#include "session/PdfInkLoader.h"
 #include "session/PdfPageSaver.h"
 #include "session/PdfSession.h"
+
+
+#include <QHash>
+#include <QImage>
 #endif
 
 #include <KoDocumentInfo.h>
@@ -106,31 +112,9 @@ PdfIoPlugin::PdfIoPlugin(QObject *parent, const QVariantList &)
     /// toolbar handler are not ready. The real action is triggered long after startup, so queueing
     /// the probe the same way is both the fix and a faithful stand-in.
     QTimer::singleShot(0, this, [this, probePath]() {
-#if defined(Q_OS_ANDROID)
-        /// Temporary, and deliberately not the picker: this drives the very same open path with a
-        /// file that is already on the device, so the crash reproduces unattended and the step
-        /// logging in the navigator can be read straight out of logcat.
-        const QDir cache(QStandardPaths::writableLocation(QStandardPaths::TempLocation));
-
-        /// The file that was picked last is the one that crashed, so it is opened first when it is
-        /// still there. The fixture is the known-good control.
-        const QStringList candidates = {
-            cache.filePath(QStringLiteral("pdfio-picked.pdf")),
-            cache.filePath(QStringLiteral("pdfio-fixture.pdf")),
-        };
-
-        for (const QString &candidate : candidates) {
-            if (!QFileInfo::exists(candidate)) {
-                continue;
-            }
-            QString why;
-            say(QStringLiteral("opening %1 (%2 bytes) through the real path")
-                    .arg(candidate).arg(QFileInfo(candidate).size()));
-            const bool ok = PdfPageNavigator::instance()->openNotebook(candidate, &why);
-            say(QStringLiteral("openNotebook = %1 (%2)").arg(ok).arg(why));
-        }
-        return;
-#endif
+        /// Android is driven by the menu action. The unattended route that opened a file from the
+        /// cache at startup is gone: it existed to reproduce the open path crash, and it found it.
+        /// Opening a document automatically on every launch would only surprise the user now.
         const int scale = qEnvironmentVariableIntValue("PDFIO_PROBE_SCALE");
         if (scale > 0) {
             runScaleProbe(scale);
@@ -161,6 +145,7 @@ void PdfIoPlugin::registerActions()
         { "pdfio_save_page", &PdfIoPlugin::slotSavePage },
         { "pdfio_next_page", &PdfIoPlugin::slotNextPage },
         { "pdfio_previous_page", &PdfIoPlugin::slotPreviousPage },
+        { "pdfio_export_pdf", &PdfIoPlugin::slotExportPdf },
     };
 
     KisMainWindow *window = viewManager()->mainWindow();
@@ -242,6 +227,67 @@ void PdfIoPlugin::slotPreviousPage()
     if (!PdfPageNavigator::instance()->previous(&why)) {
         qWarning() << "pdfio:" << why;
     }
+}
+
+void PdfIoPlugin::slotExportPdf()
+{
+    PdfPageNavigator *navigator = PdfPageNavigator::instance();
+    if (!navigator->hasNotebook()) {
+        qWarning() << "pdfio: no notebook is open";
+        return;
+    }
+
+#if defined(Q_OS_ANDROID)
+    /// Android has no useful file dialog: the export is written to a temporary file and then handed
+    /// to the system's document creator, which is where the user picks the real destination.
+    const QString target = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
+                               .filePath(QStringLiteral("pdfio-export.pdf"));
+#else
+    const QString target = QFileDialog::getSaveFileName(nullptr,
+                                                        i18n("Export the notebook to PDF"),
+                                                        QStringLiteral("notebook.pdf"),
+                                                        i18n("PDF documents (*.pdf)"));
+    if (target.isEmpty()) {
+        return;
+    }
+#endif
+
+    /// One image per page that was ever drawn on. The ink is read straight out of the saved
+    /// artifacts, so exporting does not have to open a document per page.
+    QHash<int, QImage> ink;
+    const QDir project(navigator->projectDir());
+    for (const PdfPageRecord &page : navigator->manifest().pages) {
+        const QImage pageInk = PdfInkLoader::loadInk(project.filePath(page.kraFile), nullptr);
+        if (!pageInk.isNull()) {
+            ink.insert(page.index, pageInk);
+        }
+    }
+
+    QString why;
+    if (!PdfExporter::exportWithInk(navigator->sourcePath(), navigator->manifest(),
+                                    ink, target, &why)) {
+        say(QStringLiteral("export failed: %1").arg(why));
+        return;
+    }
+
+    say(QStringLiteral("exported %1 of %2 pages with ink to %3")
+            .arg(ink.size()).arg(navigator->pageCount()).arg(target));
+
+#if defined(Q_OS_ANDROID)
+    /// Off to wherever the user chooses. The temporary file is left behind on purpose: it is what
+    /// the content resolver reads from, and the system may take its time getting there.
+    auto *writer = new AndroidDocumentPicker(this);
+    const QString suggested = QStringLiteral("%1-notes.pdf")
+                                  .arg(QFileInfo(navigator->manifest().sourceFile).completeBaseName());
+    writer->createPdf(suggested, target, [writer, this](bool written, const QString &why) {
+        writer->deleteLater();
+        if (!written) {
+            say(QStringLiteral("the export was not saved: %1").arg(why));
+            return;
+        }
+        say(QStringLiteral("the export was saved to the location that was chosen"));
+    });
+#endif
 }
 
 void PdfIoPlugin::slotSavePage()

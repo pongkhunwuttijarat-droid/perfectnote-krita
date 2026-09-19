@@ -39,6 +39,7 @@ private Q_SLOTS:
     void slotSavePage();
     void slotNextPage();
     void slotPreviousPage();
+    void slotExportPdf();
 
 private:
     void registerActions();

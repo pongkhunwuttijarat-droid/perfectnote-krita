@@ -6,6 +6,7 @@ set(kritapdfio_SOURCES
     PdfRendererSpike.cpp
     backend/PdfRenderBackendCreate.cpp
     session/PdfExporter.cpp
+    session/PdfInkLoader.cpp
     session/PdfPageSaver.cpp
     session/PdfProjectBuilder.cpp
     session/PdfSession.cpp
@@ -20,7 +21,16 @@ target_include_directories(kritapdfio PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 # has no Poppler at all and will reach android.graphics.pdf.PdfRenderer through QJniObject.
 # Everything above PdfRenderBackend is platform neutral, which is the point of the split.
 target_include_directories(kritapdfio PRIVATE ${CMAKE_SOURCE_DIR}/plugins/impex/libkra)
-target_link_libraries(kritapdfio PRIVATE kritaimage kritalibkra kritawidgetutils)
+# Reading the ink back out of a saved page needs the archive layer: a .kra is a zip, and doing
+# that by hand is work KArchive already does. Krita itself does not ask for this component, so
+# it is requested here rather than assumed.
+find_package(KF${KF_MAJOR} COMPONENTS Archive REQUIRED)
+
+target_link_libraries(kritapdfio PRIVATE
+    kritaimage
+    kritalibkra
+    kritawidgetutils
+    KF${KF_MAJOR}::Archive)
 
 if (Poppler_Qt${QT_MAJOR_VERSION}_FOUND)
     target_sources(kritapdfio PRIVATE backends/poppler/PopplerRenderBackend.cpp)

@@ -29,6 +29,7 @@ using QJniObject = QAndroidJniObject;
 namespace {
 
 const int PickRequestCode = 7001;
+const int CreateRequestCode = 7002;
 
 void reportJniException(const char *where)
 {
@@ -105,6 +106,67 @@ QString copyContentToCache(const QString &uri)
     return file.size() > 0 ? target : QString();
 }
 
+/// Writes a local file into whatever a content:// URI offers, which is how an export reaches the
+/// place the user chose. The mirror image of copyContentToCache, and needed for the same reason:
+/// the framework speaks in streams, and our renderer and exporter speak in files.
+bool writeFileToUri(const QString &localPath, const QString &uri, QString *why)
+{
+    QJniObject activity = QJniObject::callStaticObjectMethod("org/qtproject/qt5/android/QtNative",
+                                                             "activity",
+                                                             "()Landroid/app/Activity;");
+    if (!activity.isValid()) {
+        return false;
+    }
+
+    QJniObject contentResolver = activity.callObjectMethod("getContentResolver",
+                                                           "()Landroid/content/ContentResolver;");
+    QJniObject juri = QJniObject::callStaticObjectMethod("android/net/Uri", "parse",
+                                                         "(Ljava/lang/String;)Landroid/net/Uri;",
+                                                         QJniObject::fromString(uri).object<jstring>());
+    if (!contentResolver.isValid() || !juri.isValid()) {
+        return false;
+    }
+
+    QJniObject stream = contentResolver.callObjectMethod(
+        "openOutputStream", "(Landroid/net/Uri;)Ljava/io/OutputStream;", juri.object());
+    reportJniException("ContentResolver.openOutputStream");
+    if (!stream.isValid()) {
+        if (why) {
+            *why = QStringLiteral("the chosen location cannot be written");
+        }
+        return false;
+    }
+
+    QFile file(localPath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        stream.callMethod<void>("close", "()V");
+        if (why) {
+            *why = QStringLiteral("cannot read %1").arg(localPath);
+        }
+        return false;
+    }
+
+    QJniEnvironment env;
+    jbyteArray buffer = env->NewByteArray(64 * 1024);
+    if (!buffer) {
+        file.close();
+        stream.callMethod<void>("close", "()V");
+        return false;
+    }
+
+    while (!file.atEnd()) {
+        const QByteArray chunk = file.read(64 * 1024);
+        env->SetByteArrayRegion(buffer, 0, chunk.size(),
+                                reinterpret_cast<const jbyte *>(chunk.constData()));
+        stream.callMethod<void>("write", "([BII)V", buffer, jint(0), jint(chunk.size()));
+    }
+
+    env->DeleteLocalRef(buffer);
+    stream.callMethod<void>("close", "()V");
+    file.close();
+    return true;
+}
+
 } // namespace
 
 struct AndroidDocumentPicker::Private
@@ -116,9 +178,37 @@ struct AndroidDocumentPicker::Private
 {
     AndroidDocumentPicker *q = nullptr;
     std::function<void(const QString &, const QString &)> callback;
+    std::function<void(bool, const QString &)> written;
+    QString pendingLocalFile;
 
     void handleActivityResult(int receiverRequestCode, int resultCode, const QAndroidJniObject &data) override
     {
+        if (receiverRequestCode == CreateRequestCode && written) {
+            auto done = written;
+            written = nullptr;
+            const QString local = pendingLocalFile;
+            pendingLocalFile.clear();
+
+            if (resultCode != -1 || !data.isValid()) {
+                done(false, QStringLiteral("no destination was chosen"));
+                return;
+            }
+
+            QJniObject uri = data.callObjectMethod("getData", "()Landroid/net/Uri;");
+            if (!uri.isValid()) {
+                done(false, QStringLiteral("the chosen destination has no URI"));
+                return;
+            }
+
+            QJniObject text = uri.callObjectMethod("toString", "()Ljava/lang/String;");
+            qWarning("[pdfio] writing to %s", qPrintable(text.toString()));
+
+            QString why;
+            const bool ok = writeFileToUri(local, text.toString(), &why);
+            done(ok, why);
+            return;
+        }
+
         if (receiverRequestCode != PickRequestCode || !callback) {
             return;
         }
@@ -194,6 +284,34 @@ void AndroidDocumentPicker::pickPdf(std::function<void(const QString &, const QS
 #endif
 }
 
+void AndroidDocumentPicker::createPdf(const QString &suggestedName,
+                                       const QString &localFile,
+                                       std::function<void(bool, const QString &)> onWritten)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    Q_UNUSED(suggestedName);
+    Q_UNUSED(localFile);
+    onWritten(false, QStringLiteral("the document writer is only wired for the Qt5 Android build"));
+#else
+    d->written = onWritten;
+    d->pendingLocalFile = localFile;
+
+    QJniObject action = QJniObject::fromString(QStringLiteral("android.intent.action.CREATE_DOCUMENT"));
+    QJniObject type = QJniObject::fromString(QStringLiteral("application/pdf"));
+    QJniObject titleKey = QJniObject::fromString(QStringLiteral("android.intent.extra.TITLE"));
+    QJniObject title = QJniObject::fromString(suggestedName);
+
+    QJniObject intent("android/content/Intent", "(Ljava/lang/String;)V", action.object<jstring>());
+    intent.callObjectMethod("setType", "(Ljava/lang/String;)Landroid/content/Intent;", type.object<jstring>());
+    intent.callObjectMethod("putExtra", "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;",
+                            titleKey.object<jstring>(), title.object<jstring>());
+
+    qWarning("[pdfio] launching the document creator");
+    QtAndroid::startActivity(intent, CreateRequestCode, d);
+    reportJniException("startActivity(CREATE_DOCUMENT)");
+#endif
+}
+
 #else
 
 struct AndroidDocumentPicker::Private
@@ -214,6 +332,15 @@ AndroidDocumentPicker::~AndroidDocumentPicker()
 void AndroidDocumentPicker::pickPdf(std::function<void(const QString &, const QString &)> onPicked)
 {
     onPicked(QString(), QStringLiteral("no document picker on this platform"));
+}
+
+void AndroidDocumentPicker::createPdf(const QString &suggestedName,
+                                      const QString &localFile,
+                                      std::function<void(bool, const QString &)> onWritten)
+{
+    Q_UNUSED(suggestedName);
+    Q_UNUSED(localFile);
+    onWritten(false, QStringLiteral("no document writer on this platform"));
 }
 
 #endif // Q_OS_ANDROID

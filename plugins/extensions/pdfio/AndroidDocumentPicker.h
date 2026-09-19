@@ -34,6 +34,14 @@ public:
      */
     void pickPdf(std::function<void(const QString &localPath, const QString &why)> onPicked);
 
+    /**
+     * Asks Android where to put \a localFile and writes it there. \a onWritten is called with
+     * false and a reason when the user cancels or the destination refuses the write.
+     */
+    void createPdf(const QString &suggestedName,
+                   const QString &localFile,
+                   std::function<void(bool, const QString &)> onWritten);
+
 private:
     struct Private;
     Private *d;

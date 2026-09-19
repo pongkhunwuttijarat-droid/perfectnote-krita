@@ -41,6 +41,10 @@ public:
     bool previous(QString *why = nullptr);
 
     bool hasNotebook() const;
+
+    /// What the export needs to walk the notebook and find its source.
+    const PdfSessionManifest &manifest() const;
+    QString sourcePath() const;
     int pageCount() const;
     int currentIndex() const;
     QString projectDir() const;

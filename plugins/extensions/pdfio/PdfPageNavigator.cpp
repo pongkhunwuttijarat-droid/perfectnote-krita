@@ -61,6 +61,16 @@ bool PdfPageNavigator::hasNotebook() const
     return !m_projectDir.isEmpty() && m_manifest.isValid();
 }
 
+const PdfSessionManifest &PdfPageNavigator::manifest() const
+{
+    return m_manifest;
+}
+
+QString PdfPageNavigator::sourcePath() const
+{
+    return PdfSession::sourcePath(m_projectDir, m_manifest.sourceFile);
+}
+
 int PdfPageNavigator::pageCount() const
 {
     return m_manifest.pages.size();
