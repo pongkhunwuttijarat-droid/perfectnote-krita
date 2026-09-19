@@ -12,7 +12,7 @@
 #include <QFileInfo>
 #include <QStandardPaths>
 
-#include "backends/poppler/PopplerRenderBackend.h"
+#include "backend/PdfRenderBackend.h"
 #include "session/PdfProjectBuilder.h"
 #include "session/PdfSession.h"
 
@@ -79,8 +79,13 @@ bool PdfPageNavigator::openNotebook(const QString &pdfPath, QString *why)
         return false;
     }
 
-    PopplerRenderBackend backend;
-    if (!backend.open(pdfPath)) {
+    QScopedPointer<PdfRenderBackend> backend(PdfRenderBackend::create());
+    if (!backend) {
+        fail(why, QStringLiteral("no PDF render backend on this platform"));
+        return false;
+    }
+
+    if (!backend->open(pdfPath)) {
         fail(why, QStringLiteral("the renderer cannot open %1").arg(pdfPath));
         return false;
     }
@@ -100,7 +105,7 @@ bool PdfPageNavigator::openNotebook(const QString &pdfPath, QString *why)
     const PdfSessionManifest manifest =
         QFileInfo::exists(PdfSession::manifestPath(projectDir))
             ? PdfSession::openProject(projectDir, why)
-            : PdfSession::createProject(projectDir, pdfPath, backend, why);
+            : PdfSession::createProject(projectDir, pdfPath, *backend, why);
 
     if (!manifest.isValid(why)) {
         return false;
@@ -136,14 +141,19 @@ bool PdfPageNavigator::showPage(int index, QString *why)
         return false;
     }
 
-    PopplerRenderBackend backend;
+    QScopedPointer<PdfRenderBackend> backend(PdfRenderBackend::create());
+    if (!backend) {
+        fail(why, QStringLiteral("no PDF render backend on this platform"));
+        return false;
+    }
+
     const QString source = PdfSession::sourcePath(m_projectDir, m_manifest.sourceFile);
-    if (!backend.open(source)) {
+    if (!backend->open(source)) {
         fail(why, QStringLiteral("the renderer cannot open %1").arg(source));
         return false;
     }
 
-    KisImageSP image = PdfProjectBuilder::buildPageImage(m_manifest.pages.at(index), backend, 200.0, why);
+    KisImageSP image = PdfProjectBuilder::buildPageImage(m_manifest.pages.at(index), *backend, 200.0, why);
     if (!image) {
         return false;
     }

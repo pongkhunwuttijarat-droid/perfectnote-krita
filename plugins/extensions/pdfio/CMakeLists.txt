@@ -1,7 +1,14 @@
 set(kritapdfio_SOURCES
     PdfIoPlugin.cpp
     PdfIoProbe.cpp
+    PdfPageNavigator.cpp
     PdfRendererSpike.cpp
+    backend/PdfRenderBackendCreate.cpp
+    session/PdfExporter.cpp
+    session/PdfPageSaver.cpp
+    session/PdfProjectBuilder.cpp
+    session/PdfSession.cpp
+    session/PdfSessionManifest.cpp
     )
 
 kis_add_library(kritapdfio MODULE ${kritapdfio_SOURCES})
@@ -11,24 +18,19 @@ target_include_directories(kritapdfio PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 # The backend split: desktop reuses the Poppler dependency Krita already has, while Android
 # has no Poppler at all and will reach android.graphics.pdf.PdfRenderer through QJniObject.
 # Everything above PdfRenderBackend is platform neutral, which is the point of the split.
+target_include_directories(kritapdfio PRIVATE ${CMAKE_SOURCE_DIR}/plugins/impex/libkra)
+target_link_libraries(kritapdfio PRIVATE kritaimage kritalibkra)
+
 if (Poppler_Qt${QT_MAJOR_VERSION}_FOUND)
-    target_sources(kritapdfio PRIVATE
-        PdfPageNavigator.cpp
-        backends/poppler/PopplerRenderBackend.cpp
-        session/PdfSession.cpp
-        session/PdfSessionManifest.cpp
-        session/PdfProjectBuilder.cpp
-        session/PdfPageSaver.cpp)
-
-    # KraConverter, the only lever that skips mergedimage.png, lives in the KRA importer.
-    target_include_directories(kritapdfio PRIVATE ${CMAKE_SOURCE_DIR}/plugins/impex/libkra)
-
-    target_link_libraries(kritapdfio PRIVATE
-        Poppler::Qt${QT_MAJOR_VERSION}
-        kritaimage
-        kritalibkra)
-
+    target_sources(kritapdfio PRIVATE backends/poppler/PopplerRenderBackend.cpp)
+    target_link_libraries(kritapdfio PRIVATE Poppler::Qt${QT_MAJOR_VERSION})
     target_compile_definitions(kritapdfio PRIVATE PDFIO_HAVE_POPPLER)
+endif()
+
+if (ANDROID)
+    # android.graphics.pdf.PdfRenderer is a framework class, so it is reached straight from C++
+    # and no Java of ours has to be added to the APK.
+    target_sources(kritapdfio PRIVATE backends/android/AndroidRenderBackend.cpp)
 endif()
 
 if (ANDROID)

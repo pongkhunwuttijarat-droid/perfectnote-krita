@@ -42,8 +42,10 @@ namespace {
 
 void say(const QString &message)
 {
+    /// Both sinks: see the note in PdfIoProbe about desktop versus Android.
     fprintf(stderr, "[pdfio] %s\n", qPrintable(message));
     fflush(stderr);
+    qWarning("[pdfio] %s", qPrintable(message));
 }
 
 /// Resident set size in kilobytes, from /proc: the number that decides whether a notebook can
@@ -71,17 +73,26 @@ PdfIoPlugin::PdfIoPlugin(QObject *parent, const QVariantList &)
     /// Temporary: answers whether the Android render backend can be pure C++.
     PdfRendererSpike::run();
 
-    const QString probePath = qEnvironmentVariable("PDFIO_PROBE");
+    QString probePath = qEnvironmentVariable("PDFIO_PROBE");
+#if defined(Q_OS_ANDROID)
+    /// Temporary: adb cannot hand an environment variable to an Android application, so on
+    /// Android the probe always runs, against the fixture it writes for itself.
+    probePath = QStringLiteral("__builtin__");
+#endif
     if (probePath.isEmpty()) {
         return;
     }
 
-    /// Krita's own message handler swallows plugin output during startup, so route everything to
-    /// stderr while the probe runs.
+#if !defined(Q_OS_ANDROID)
+    /// On desktop Krita's own message handler swallows plugin output during startup, so the probe
+    /// routes everything to stderr. Not on Android, where stderr goes nowhere and Krita's Android
+    /// log handler is the thing that reaches logcat -- installing this there swallowed the very
+    /// output it was meant to reveal.
     qInstallMessageHandler([](QtMsgType, const QMessageLogContext &, const QString &message) {
         fprintf(stderr, "[probe] %s\n", qPrintable(message));
         fflush(stderr);
     });
+#endif
 
     PdfIoProbe::runIfRequested();
 

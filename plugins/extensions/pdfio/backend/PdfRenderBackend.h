@@ -61,6 +61,12 @@ public:
      * rewrites an original object, so the text has to come back out.
      */
     virtual QString pageText(int index) const = 0;
+
+    /**
+     * The backend this build has: Poppler where it exists, android.graphics.pdf.PdfRenderer on
+     * Android, nothing otherwise. Returns null when neither is available.
+     */
+    static PdfRenderBackend *create();
 };
 
 #endif // PDFRENDERBACKEND_H
