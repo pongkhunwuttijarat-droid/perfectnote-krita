@@ -34,6 +34,16 @@ public:
     static QString inkLayerName();
 
     /**
+     * The paint layer inside the Ink group.
+     *
+     * A group layer cannot be painted on, so the group alone is not enough to draw into:
+     * selecting "Ink" and trying to paint does nothing at all. The group ships with this paint
+     * layer, and it is the node that should be active when the page opens.
+     */
+    static QString inkStrokeLayerName();
+    static KisNodeSP inkStrokeLayer(const KisImageSP &image);
+
+    /**
      * Renders a page and builds the image around it. Returns a null image and sets a why on
      * failure, for instance when the renderer cannot produce the page.
      */

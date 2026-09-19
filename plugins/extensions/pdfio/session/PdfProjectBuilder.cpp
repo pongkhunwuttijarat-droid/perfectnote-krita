@@ -39,6 +39,25 @@ QString PdfProjectBuilder::inkLayerName()
     return QStringLiteral("Ink");
 }
 
+QString PdfProjectBuilder::inkStrokeLayerName()
+{
+    return QStringLiteral("Layer 1");
+}
+
+KisNodeSP PdfProjectBuilder::inkStrokeLayer(const KisImageSP &image)
+{
+    if (!image || !image->root() || image->root()->childCount() < 2) {
+        return KisNodeSP();
+    }
+
+    KisNodeSP group = image->root()->at(1);
+    if (!group || group->childCount() == 0) {
+        return KisNodeSP();
+    }
+
+    return group->at(0);
+}
+
 KisImageSP PdfProjectBuilder::buildPageImage(const PdfPageRecord &page,
                                              PdfRenderBackend &backend,
                                              qreal dpi,
@@ -78,6 +97,11 @@ KisImageSP PdfProjectBuilder::buildPageImage(const PdfPageRecord &page,
     /// Added in order: the background first, so the Ink group ends up above it.
     image->addNode(background, image->root());
     image->addNode(ink, image->root());
+
+    /// The Ink group needs a paint layer of its own. A group is not paintable, so without this
+    /// the user selects Ink, draws, and nothing happens at all.
+    KisPaintLayerSP stroke = new KisPaintLayer(image, inkStrokeLayerName(), OPACITY_OPAQUE_U8);
+    image->addNode(stroke, ink);
 
     return image;
 }

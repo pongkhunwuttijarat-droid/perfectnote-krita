@@ -41,3 +41,4 @@ if (BUILD_TESTING)
 endif()
 
 install(TARGETS kritapdfio DESTINATION ${KRITA_PLUGIN_INSTALL_DIR})
+install(FILES PdfIoPlugin.action DESTINATION ${KDE_INSTALL_DATADIR}/krita/actions)

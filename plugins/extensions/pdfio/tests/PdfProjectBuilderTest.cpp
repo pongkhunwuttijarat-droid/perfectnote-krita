@@ -73,7 +73,16 @@ void PdfProjectBuilderTest::testPageImageStructure()
     QCOMPARE(top->name(), PdfProjectBuilder::inkLayerName());
     QVERIFY(!top->userLocked());
     QVERIFY(qobject_cast<KisGroupLayer *>(top.data()));
-    QCOMPARE(top->childCount(), 0u);
+
+    /// A group is not paintable: the Ink group has to carry a paint layer, otherwise selecting
+    /// it and drawing does nothing.
+    QCOMPARE(top->childCount(), 1u);
+    KisNodeSP stroke = top->at(0);
+    QVERIFY(stroke);
+    QVERIFY(qobject_cast<KisPaintLayer *>(stroke.data()));
+    QCOMPARE(stroke->name(), PdfProjectBuilder::inkStrokeLayerName());
+    QVERIFY(!stroke->userLocked());
+    QCOMPARE(PdfProjectBuilder::inkStrokeLayer(image), stroke);
 
     /// The rendered page really landed: the fixture draws text, so something is not white.
     QImage flattened = bottom->paintDevice()->convertToQImage(0, image->bounds());

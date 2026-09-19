@@ -101,7 +101,10 @@ void runIfRequested()
     notes->paintDevice()->fill(QRect(20, 20, 40, 40), KoColor(Qt::black, image->colorSpace()));
 
     KisDocument *document = KisPart::instance()->createDocument();
-    document->setCurrentImage(image, false);
+    /// true: force the initial graph refresh. Without it the projection stays empty and the
+    /// merged image written to the archive is a blank page, which understates what a naive save
+    /// of a real session would cost.
+    document->setCurrentImage(image, true);
 
     /// The save is deliberately not attempted. KraConverter reads doc->savingImage(), which
     /// KisDocument only fills in inside a real save operation and exposes no setter for, so
@@ -166,6 +169,62 @@ void runIfRequested()
     fprintf(stderr, "[probe] saveAs(ink only): %d\n", int(saveAndWait(inkDocument, inkOnlyPath)));
     archiveReport(QStringLiteral("ink-only.kra"), inkOnlyPath);
     KisPart::instance()->removeDocument(inkDocument, true);
+
+    /// Optional: build the whole project the way a real notebook would, one ink-only artifact
+    /// per page, and report what it weighs on disk. This is the only way to get a real answer:
+    /// the fixed costs per artifact (ICC profiles, preview, merged image, document xml) only
+    /// show up when there are many of them.
+    if (qEnvironmentVariableIsSet("PDFIO_PROBE_LOOP")) {
+        const QString pagesDir = QDir(projectDir).filePath(QStringLiteral("pages"));
+        qint64 total = 0;
+
+        for (int i = 0; i < manifest.pages.size(); ++i) {
+            QString pageWhy;
+            KisImageSP pageImage =
+                PdfProjectBuilder::buildPageImage(manifest.pages.at(i), backend, 200.0, &pageWhy);
+            if (!pageImage) {
+                fprintf(stderr, "[probe] page %d FAILED: %s\n", i + 1, qPrintable(pageWhy));
+                continue;
+            }
+
+            KisGroupLayer *inkGroup = qobject_cast<KisGroupLayer *>(pageImage->root()->at(1).data());
+            KisPaintLayerSP inkLayer = new KisPaintLayer(pageImage, QStringLiteral("Ink"), OPACITY_OPAQUE_U8);
+            pageImage->addNode(inkLayer, inkGroup);
+
+            /// A hundred strokes the size of a line of handwriting, spread over the page.
+            for (int stroke = 0; stroke < 100; ++stroke) {
+                const int x = 60 + (stroke / 25) * 480;
+                const int y = 80 + (stroke % 25) * 90;
+                inkLayer->paintDevice()->fill(QRect(x, y, 400, 6),
+                                              KoColor(Qt::black, pageImage->colorSpace()));
+            }
+
+            /// What gets persisted is a document holding that ink and nothing else.
+            KisImageSP inkOnlyPage = new KisImage(0, pageImage->width(), pageImage->height(),
+                                                  pageImage->colorSpace(), QStringLiteral("ink"));
+            inkOnlyPage->setResolution(200.0, 200.0);
+            KisPaintLayerSP inkCopy = new KisPaintLayer(inkOnlyPage, QStringLiteral("Ink"), OPACITY_OPAQUE_U8);
+            inkCopy->paintDevice()->makeCloneFrom(inkLayer->paintDevice(), pageImage->bounds());
+            inkOnlyPage->addNode(inkCopy, inkOnlyPage->root());
+
+            KisDocument *pageDocument = KisPart::instance()->createDocument();
+            pageDocument->setCurrentImage(inkOnlyPage, false);
+            const QString pagePath = QDir(pagesDir).filePath(
+                QStringLiteral("p%1.kra").arg(i + 1, 4, 10, QLatin1Char('0')));
+            saveAndWait(pageDocument, pagePath);
+            KisPart::instance()->removeDocument(pageDocument, true);
+
+            const qint64 pageBytes = QFileInfo(pagePath).size();
+            total += pageBytes;
+            if (i < 3 || i + 1 == manifest.pages.size()) {
+                fprintf(stderr, "[probe] page %d/%d: %lld bytes\n",
+                        i + 1, manifest.pages.size(), pageBytes);
+            }
+        }
+
+        fprintf(stderr, "[probe] project pages: %lld bytes total, %lld average per page\n",
+                total, total / qMax(1, manifest.pages.size()));
+    }
 
     KisPart::instance()->removeDocument(document, true);
 
