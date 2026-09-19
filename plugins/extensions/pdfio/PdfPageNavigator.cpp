@@ -514,19 +514,21 @@ bool PdfPageNavigator::showPage(int index, QString *why)
         return false;
     }
 
-    /// A page that is already inside the open strip costs nothing to reach: no renderer, no
-    /// document, no view. Unlocking its slot and asking for it is the whole point of design B --
-    /// the 650 ms a page turn costs is almost all document and view, measured on the tablet.
-    if (m_document && m_stripPages.contains(index)) {
-        return activateWithinStrip(index, why);
-    }
-
-    /// Anything else leaves the page that is open, and that page is written before it goes.
+    /// Whatever happens next, the page that is open is written first. This has to come before the
+    /// page that is already in the strip is reached, or turning to a page next to the current one
+    /// would skip the save entirely -- which it did, and the artifact came out empty.
     if (m_document && m_document->image() && m_index != index) {
         QString saveError;
         if (!saveCurrentPage(&saveError)) {
             say(QStringLiteral("could not save the page being left: %1").arg(saveError));
         }
+    }
+
+    /// A page that is already inside the open strip costs nothing to reach: no renderer, no
+    /// document, no view. Unlocking its slot and asking for it is the whole point of design B --
+    /// the 650 ms a page turn costs is almost all document and view, measured on the tablet.
+    if (m_document && m_stripPages.contains(index)) {
+        return activateWithinStrip(index, why);
     }
 
     return m_scope > 1 ? buildForStrip(index, why) : buildForSinglePage(index, why);

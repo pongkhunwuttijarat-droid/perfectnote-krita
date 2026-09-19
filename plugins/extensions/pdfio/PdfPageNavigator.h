@@ -137,9 +137,12 @@ private:
 
     /// How many pages the open document holds at full resolution, and at what resolution.
     ///
-    /// One until the strip can save a single page out of itself: with several pages in one image,
-    /// saving without cropping would write the whole strip as one page's ink.
-    int m_scope = 1;
+    /// Three, which is design B. Verified end to end before it was turned on: a mark drawn a
+    /// hundred pixels into the page comes back a hundred pixels into an artifact the size of the
+    /// page and not of the strip, and turning between pages already in the strip builds nothing.
+    /// One was the safe answer while the cropping was unproven, because saving a strip without
+    /// cropping writes several pages into one page's ink, quietly.
+    int m_scope = 3;
     qreal m_dpi = 200.0;
 
     /// The pages the open strip holds and where each sits. Empty when the document is a single

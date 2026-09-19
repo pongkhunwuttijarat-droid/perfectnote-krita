@@ -61,6 +61,12 @@ private:
     /// Temporary: asks for a thumbnail of every page and reports which ones appeared, so the lazy
     /// path is checked without opening the docker by hand.
     void runThumbnailProbe();
+
+    /// Temporary: the strip, end to end. Opens with a scope above one, draws a mark at a place
+    /// that is known in the page's own coordinates, turns away and back, and then checks that the
+    /// artifact is the size of the page and holds the mark where it was drawn. Cropping that is
+    /// wrong is silent, which is what makes this worth an explicit check.
+    void runStripProbe();
 };
 
 #endif // PDFIOPLUGIN_H

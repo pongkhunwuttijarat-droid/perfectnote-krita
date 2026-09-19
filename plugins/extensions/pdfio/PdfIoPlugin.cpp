@@ -30,6 +30,8 @@
 #include "session/PdfInkLoader.h"
 #include "session/PdfPageSaver.h"
 #include "session/PdfProjectBuilder.h"
+#include "session/PdfStripBuilder.h"
+#include "session/PdfStripLayout.h"
 #include "session/PdfSession.h"
 
 #include <QHash>
@@ -126,6 +128,10 @@ PdfIoPlugin::PdfIoPlugin(QObject *parent, const QVariantList &)
         /// Android is driven by the menu action. The unattended route that opened a file from the
         /// cache at startup is gone: it existed to reproduce the open path crash, and it found it.
         /// Opening a document automatically on every launch would only surprise the user now.
+        if (qEnvironmentVariableIntValue("PDFIO_PROBE_STRIP") > 0) {
+            runStripProbe();
+            return;
+        }
         if (qEnvironmentVariableIntValue("PDFIO_PROBE_THUMBS") > 0) {
             runThumbnailProbe();
             return;
@@ -527,6 +533,110 @@ void PdfIoPlugin::runPanProbe()
             say(QStringLiteral("pan: at the far right the page right sits at %1 of %2")
                     .arg(atRight.right()).arg(widget->width()));
         }
+    });
+}
+
+void PdfIoPlugin::runStripProbe()
+{
+    PdfPageNavigator *navigator = PdfPageNavigator::instance();
+    navigator->setScope(3);
+
+    QString why;
+    if (!navigator->openNotebook(qEnvironmentVariable("PDFIO_PROBE"), &why)) {
+        say(QStringLiteral("strip: cannot open the notebook: %1").arg(why));
+        return;
+    }
+
+    const int first = navigator->currentIndex();
+    say(QStringLiteral("strip: opened page %1 with scope %2")
+            .arg(first + 1).arg(navigator->scope()));
+
+    /// Not a ternary: document->image() hands back a weak pointer, and a conditional cannot mix
+    /// that with a strong one. Third time this has been written the wrong way.
+    KisDocument *document = navigator->currentDocument();
+    if (!document) {
+        say(QStringLiteral("strip: no document is open"));
+        return;
+    }
+    KisImageSP image = document->image();
+    if (!image) {
+        say(QStringLiteral("strip: no image is open"));
+        return;
+    }
+
+    /// The page's own rectangle inside the strip, worked out the same way the strip was: the mark
+    /// goes a hundred pixels in from the page's corner, wherever that corner is.
+    const PdfStripLayout layout =
+        PdfStripLayout::forWindow(navigator->manifest(), first, 3, 200.0);
+    const int slot = layout.slotForPage(first);
+    if (!layout.isValid() || slot < 0) {
+        say(QStringLiteral("strip: the layout does not hold that page"));
+        return;
+    }
+    const QRect area = layout.slots().at(slot).rect;
+
+    KisPaintLayer *stroke = nullptr;
+    const QString groupName = PdfStripBuilder::inkGroupName(first);
+    for (quint32 i = 0; i < image->root()->childCount(); ++i) {
+        KisNodeSP child = image->root()->at(i);
+        if (child->name() == groupName && child->childCount() > 0) {
+            stroke = qobject_cast<KisPaintLayer *>(child->at(0).data());
+            break;
+        }
+    }
+    if (!stroke) {
+        say(QStringLiteral("strip: no Ink layer for page %1").arg(first + 1));
+        return;
+    }
+
+    stroke->paintDevice()->fill(QRect(area.x() + 100, area.y() + 100, 200, 40),
+                                KoColor(Qt::black, image->colorSpace()));
+    say(QStringLiteral("strip: drew at %1,%2 in the strip, which is the page's 100,100")
+            .arg(area.x() + 100).arg(area.y() + 100));
+
+    QTimer::singleShot(700, this, [this, navigator, first]() {
+        QString why;
+        say(QStringLiteral("strip: turning forward"));
+        if (!navigator->next(&why)) {
+            say(QStringLiteral("strip: cannot turn forward: %1").arg(why));
+            return;
+        }
+
+        QTimer::singleShot(700, this, [this, navigator, first]() {
+            QString why;
+            say(QStringLiteral("strip: turning back"));
+            if (!navigator->previous(&why)) {
+                say(QStringLiteral("strip: cannot turn back: %1").arg(why));
+                return;
+            }
+
+            QTimer::singleShot(1200, this, [navigator, first]() {
+                const PdfPageRecord &page = navigator->manifest().pages.at(first);
+                const QImage ink = PdfInkLoader::loadInk(
+                    QDir(navigator->projectDir()).filePath(page.kraFile), nullptr);
+
+                const int expectedWidth = qRound(page.sizePt.width() * 200.0 / 72.0);
+                const int expectedHeight = qRound(page.sizePt.height() * 200.0 / 72.0);
+
+                QRect darkBounds;
+                for (int y = 0; y < ink.height(); ++y) {
+                    for (int x = 0; x < ink.width(); ++x) {
+                        if (qAlpha(ink.pixel(x, y)) > 0) {
+                            darkBounds = darkBounds.isNull()
+                                ? QRect(x, y, 1, 1)
+                                : darkBounds.united(QRect(x, y, 1, 1));
+                        }
+                    }
+                }
+
+                say(QStringLiteral("strip: artifact %1x%2, page is %3x%4, ink at %5,%6 %7x%8 "
+                                   "(expected 100,100 200x40)")
+                        .arg(ink.width()).arg(ink.height())
+                        .arg(expectedWidth).arg(expectedHeight)
+                        .arg(darkBounds.x()).arg(darkBounds.y())
+                        .arg(darkBounds.width()).arg(darkBounds.height()));
+            });
+        });
     });
 }
 

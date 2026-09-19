@@ -25,7 +25,11 @@ add_subdirectory(svgcollectiondocker)
 add_subdirectory(histogram)
 add_subdirectory(gamutmask)
 add_subdirectory(recorder)
-add_subdirectory(touchdocker)
+# The touch docker is upstream's strip of on-screen buttons for painting with a finger. Not built
+# in this fork: everything it offers -- undo, brush, size -- is already in Krita's own interface,
+# and it is not what a notebook needs on a tablet. What took its place is the Notebook docker,
+# which turns pages. See docs/PDFIO-DESIGN-STRIP.md.
+# add_subdirectory(touchdocker)
 add_subdirectory(logdocker)
 add_subdirectory(snapshotdocker)
 add_subdirectory(storyboarddocker)
