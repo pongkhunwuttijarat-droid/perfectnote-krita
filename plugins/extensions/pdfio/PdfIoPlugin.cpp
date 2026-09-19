@@ -8,6 +8,8 @@
 #include "PdfIoProbe.h"
 #include "PdfRendererSpike.h"
 
+#include <cstdio>
+
 #include <QDebug>
 #include <QFileInfo>
 
@@ -38,12 +40,12 @@ void probeDesktopBackendIfRequested()
         return;
     }
 
-    qDebug() << "[pdfio] opened" << QFileInfo(path).fileName()
+    qWarning() << "[pdfio] opened" << QFileInfo(path).fileName()
              << "pages" << backend.pageCount();
     for (int i = 0; i < backend.pageCount(); ++i) {
         const PdfPageInfo info = backend.pageInfo(i);
         const QImage image = backend.renderPage(i, 200.0);
-        qDebug() << "[pdfio] page" << i + 1
+        qWarning() << "[pdfio] page" << i + 1
                  << "sizePt" << info.sizePt << "rotate" << info.rotation
                  << "render" << image.size();
     }
@@ -57,6 +59,16 @@ K_PLUGIN_FACTORY_WITH_JSON(PdfIoPluginFactory, "kritapdfio.json", registerPlugin
 PdfIoPlugin::PdfIoPlugin(QObject *parent, const QVariantList &)
     : KisActionPlugin(parent)
 {
+    if (!qEnvironmentVariable("PDFIO_PROBE").isEmpty()) {
+        /// Temporary: Krita's own message handler swallows plugin output during startup, so
+        /// the probe routes everything straight to stderr while it is running.
+        qInstallMessageHandler([](QtMsgType, const QMessageLogContext &, const QString &message) {
+            fprintf(stderr, "[probe] %s\n", qPrintable(message));
+            fflush(stderr);
+        });
+        fprintf(stderr, "[probe] plugin constructed, probe requested\n");
+    }
+
     /// Temporary: answers whether the Android render backend can be pure C++.
     PdfRendererSpike::run();
     /// Temporary: exercises the desktop backend on demand.

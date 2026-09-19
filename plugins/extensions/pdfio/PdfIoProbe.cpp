@@ -6,6 +6,8 @@
 
 #include "PdfIoProbe.h"
 
+#include <cstdio>
+
 #include <QDebug>
 #include <QFile>
 #include <QTemporaryDir>
@@ -48,7 +50,7 @@ void runIfRequested()
         qWarning() << "[pdfio] cannot open" << fixture;
         return;
     }
-    qDebug() << "[pdfio] backend: pages" << backend.pageCount();
+    qWarning() << "[pdfio] backend: pages" << backend.pageCount();
 
     QString why;
 
@@ -60,13 +62,13 @@ void runIfRequested()
         qWarning() << "[pdfio] session FAILED:" << why;
         return;
     }
-    qDebug() << "[pdfio] session: ok, pages" << manifest.pages.size()
+    qWarning() << "[pdfio] session: ok, pages" << manifest.pages.size()
              << "source" << manifest.sourceFile
              << "sha" << manifest.sourceSha256.left(12);
 
     /// reopening has to accept the project it just wrote
     const PdfSessionManifest reopened = PdfSession::openProject(projectDir, &why);
-    qDebug() << "[pdfio] reopen:" << (reopened.isValid() ? "ok" : "FAILED") << why;
+    qWarning() << "[pdfio] reopen:" << (reopened.isValid() ? "ok" : "FAILED") << why;
 
     /// 2. the layer stack of the rotated page, the one that used to be the interesting case
     const PdfPageRecord &page = manifest.pages.at(1);
@@ -78,7 +80,7 @@ void runIfRequested()
 
     KisNodeSP background = image->root()->at(0);
     KisNodeSP inkNode = image->root()->at(1);
-    qDebug() << "[pdfio] image: ok" << image->width() << "x" << image->height()
+    qWarning() << "[pdfio] image: ok" << image->width() << "x" << image->height()
              << "at" << image->xRes() << "dpi"
              << "| layers" << image->root()->childCount()
              << "| bottom" << background->name() << "locked" << background->userLocked()
@@ -104,13 +106,13 @@ void runIfRequested()
     /// on M4b rather than a detail: either KisDocument grows a small public lever, or the
     /// session drives the autosave path, which is the one place upstream already skips
     /// mergedimage.png.
-    qDebug() << "[pdfio] document: created, savingImage null as expected:"
+    qWarning() << "[pdfio] document: created, savingImage null as expected:"
              << !document->savingImage()
              << "| image attached:" << bool(document->image());
 
     KisPart::instance()->removeDocument(document, true);
 
-    qDebug() << "[pdfio] probe done";
+    qWarning() << "[pdfio] probe done";
 }
 
 } // namespace PdfIoProbe
