@@ -9,8 +9,11 @@
 #include <cstdio>
 
 #include <QDebug>
+#include <QDir>
+#include <QEventLoop>
 #include <QFile>
 #include <QTemporaryDir>
+#include <QTimer>
 
 #if defined(PDFIO_HAVE_POPPLER)
 
@@ -125,9 +128,29 @@ void runIfRequested()
                 int(raw.contains("mergedimage.png")));
     };
 
-    const QString withPagePath = workspace.filePath(QStringLiteral("with-page.kra"));
-    const bool savedWithPage = document->saveAs(withPagePath, QByteArrayLiteral("application/x-krita"), false);
-    fprintf(stderr, "[probe] saveAs(with page): %d\n", int(savedWithPage));
+    /// Krita saves in the background, so the archive is not on disk when saveAs() returns.
+    /// Wait for sigSavingFinished, with a guard so a stuck save cannot hang the probe forever.
+    auto saveAndWait = [](KisDocument *doc, const QString &path) {
+        QEventLoop loop;
+        bool finished = false;
+        QObject::connect(doc, &KisDocument::sigSavingFinished, &loop,
+                         [&loop, &finished](const QString &) { finished = true; loop.quit(); });
+        QTimer::singleShot(60000, &loop, [&loop]() { loop.quit(); });
+
+        if (!doc->saveAs(path, QByteArrayLiteral("application/x-krita"), false)) {
+            return false;
+        }
+        loop.exec();
+        return finished;
+    };
+
+    /// Written outside the temporary directory so the archives outlive the process and can be
+    /// taken apart with unzip afterwards.
+    const QString outDir = qEnvironmentVariable("PDFIO_PROBE_OUT", QStringLiteral("/tmp/pdfio-probe"));
+    QDir().mkpath(outDir);
+
+    const QString withPagePath = QDir(outDir).filePath(QStringLiteral("with-page.kra"));
+    fprintf(stderr, "[probe] saveAs(with page): %d\n", int(saveAndWait(document, withPagePath)));
     archiveReport(QStringLiteral("with-page.kra"), withPagePath);
 
     KisImageSP inkOnly = new KisImage(0, image->width(), image->height(), image->colorSpace(),
@@ -139,9 +162,8 @@ void runIfRequested()
 
     KisDocument *inkDocument = KisPart::instance()->createDocument();
     inkDocument->setCurrentImage(inkOnly, false);
-    const QString inkOnlyPath = workspace.filePath(QStringLiteral("ink-only.kra"));
-    const bool savedInkOnly = inkDocument->saveAs(inkOnlyPath, QByteArrayLiteral("application/x-krita"), false);
-    fprintf(stderr, "[probe] saveAs(ink only): %d\n", int(savedInkOnly));
+    const QString inkOnlyPath = QDir(outDir).filePath(QStringLiteral("ink-only.kra"));
+    fprintf(stderr, "[probe] saveAs(ink only): %d\n", int(saveAndWait(inkDocument, inkOnlyPath)));
     archiveReport(QStringLiteral("ink-only.kra"), inkOnlyPath);
     KisPart::instance()->removeDocument(inkDocument, true);
 
