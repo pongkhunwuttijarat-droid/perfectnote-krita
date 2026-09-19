@@ -157,7 +157,10 @@ private:
     /// page and not of the strip, and turning between pages already in the strip builds nothing.
     /// One was the safe answer while the cropping was unproven, because saving a strip without
     /// cropping writes several pages into one page's ink, quietly.
-    int m_scope = 3;
+    /// Five, so that turning through a run of pages stays inside one strip and the window does not
+    /// have to be rebuilt every other turn -- which is what made page turns look like jumps of the
+    /// whole window rather than a move to the next page.
+    int m_scope = 5;
     qreal m_dpi = 200.0;
 
     /// The pages the open strip holds and where each sits. Empty when the document is a single

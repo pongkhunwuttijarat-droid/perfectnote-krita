@@ -282,6 +282,18 @@ int PdfPageNavigator::pageAtDocumentPoint(const QPointF &point, qreal zoom) cons
         return -1;
     }
 
+    /// In a strip every page's rectangle is known exactly, so they are used directly rather than
+    /// worked out from the page that happens to be open. The approximation below is for a document
+    /// that holds one page and has no neighbours to name.
+    if (!m_stripPages.isEmpty()) {
+        for (int slot = 0; slot < m_stripPages.size() && slot < m_stripRects.size(); ++slot) {
+            if (m_stripPages.at(slot) >= 0 && QRectF(m_stripRects.at(slot)).contains(point)) {
+                return m_stripPages.at(slot);
+            }
+        }
+        return -1;
+    }
+
     const QSizeF page(m_document->image()->width(), m_document->image()->height());
     const QRectF pageRect(0, 0, page.width(), page.height());
     if (pageRect.contains(point)) {
