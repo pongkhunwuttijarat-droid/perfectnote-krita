@@ -110,6 +110,41 @@ void runIfRequested()
              << !document->savingImage()
              << "| image attached:" << bool(document->image());
 
+    /// Which artifact is actually expensive? Save the editing document (page + ink) and an
+    /// ink-only one, and compare. The design assumed the merged image was the problem; if the
+    /// page is not in the saved document it may be cheap enough to stop fighting KraConverter.
+    auto archiveReport = [](const QString &label, const QString &path) {
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            fprintf(stderr, "[probe] %s: could not read\n", qPrintable(label));
+            return;
+        }
+        const QByteArray raw = file.readAll();
+        fprintf(stderr, "[probe] %s: %lld bytes, zip %d, mergedimage %d\n",
+                qPrintable(label), qint64(raw.size()), int(raw.startsWith(QByteArrayLiteral("PK"))),
+                int(raw.contains("mergedimage.png")));
+    };
+
+    const QString withPagePath = workspace.filePath(QStringLiteral("with-page.kra"));
+    const bool savedWithPage = document->saveAs(withPagePath, QByteArrayLiteral("application/x-krita"), false);
+    fprintf(stderr, "[probe] saveAs(with page): %d\n", int(savedWithPage));
+    archiveReport(QStringLiteral("with-page.kra"), withPagePath);
+
+    KisImageSP inkOnly = new KisImage(0, image->width(), image->height(), image->colorSpace(),
+                                      QStringLiteral("ink only"));
+    inkOnly->setResolution(image->xRes(), image->yRes());
+    KisPaintLayerSP onlyInk = new KisPaintLayer(inkOnly, QStringLiteral("Ink"), OPACITY_OPAQUE_U8);
+    onlyInk->paintDevice()->fill(QRect(20, 20, 40, 40), KoColor(Qt::black, inkOnly->colorSpace()));
+    inkOnly->addNode(onlyInk, inkOnly->root());
+
+    KisDocument *inkDocument = KisPart::instance()->createDocument();
+    inkDocument->setCurrentImage(inkOnly, false);
+    const QString inkOnlyPath = workspace.filePath(QStringLiteral("ink-only.kra"));
+    const bool savedInkOnly = inkDocument->saveAs(inkOnlyPath, QByteArrayLiteral("application/x-krita"), false);
+    fprintf(stderr, "[probe] saveAs(ink only): %d\n", int(savedInkOnly));
+    archiveReport(QStringLiteral("ink-only.kra"), inkOnlyPath);
+    KisPart::instance()->removeDocument(inkDocument, true);
+
     KisPart::instance()->removeDocument(document, true);
 
     qWarning() << "[pdfio] probe done";
