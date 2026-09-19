@@ -67,6 +67,10 @@ constexpr qreal GapWidgetPixels = 16;
 /// stays sharp when the interface is scaled up.
 constexpr int ThumbnailPixels = 256;
 
+/// The coarsest a page is rendered at on its way to a thumbnail. Below this, text stops being
+/// recognisable and the thumbnail stops being useful for choosing a page.
+constexpr qreal ThumbnailRenderDpi = 96;
+
 } // namespace
 
 PdfPageNavigator *PdfPageNavigator::instance()
@@ -209,11 +213,13 @@ void PdfPageNavigator::makeOneThumbnail()
         }
     }
 
-    /// Asked for at a resolution that produces a thumbnail directly, rather than rendered large
-    /// and shrunk: the point of a thumbnail is that it is cheap.
+    /// Rendered coarser than the page but never as coarse as the thumbnail's own pixel count
+    /// suggests. Asking for exactly 256 pixels of an A4 page means about 31 dpi, and text at 31 dpi
+    /// is a grey smear: the thumbnail was unreadable. Rendering at 96 and shrinking costs a
+    /// megapixel and looks like a page.
     const PdfPageInfo info = m_thumbnailBackend->pageInfo(index);
     const qreal widthPt = qMax(qreal(1), info.sizePt.width());
-    const qreal dpi = qBound(qreal(4), ThumbnailPixels * 72.0 / widthPt, qreal(150));
+    const qreal dpi = qBound(ThumbnailRenderDpi, ThumbnailPixels * 72.0 / widthPt, qreal(200));
 
     const QImage page = m_thumbnailBackend->renderPage(index, dpi);
     if (page.isNull()) {

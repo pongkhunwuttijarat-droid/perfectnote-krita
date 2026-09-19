@@ -23,6 +23,10 @@
 PdfPageStripDecoration::PdfPageStripDecoration(const QString &id, QPointer<KisView> parent)
     : KisCanvasDecoration(id, parent)
 {
+    /// The base class starts hidden and paint() returns immediately for a decoration that is not
+    /// visible, so a decoration that never says otherwise draws nothing at all. That is exactly
+    /// what this one did until it was noticed that no thumbnails were appearing on the canvas.
+    setVisible(true);
 }
 
 void PdfPageStripDecoration::drawDecoration(QPainter &gc,
