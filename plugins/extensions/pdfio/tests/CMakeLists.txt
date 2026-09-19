@@ -81,4 +81,9 @@ if (Poppler_Qt${QT_MAJOR_VERSION}_FOUND)
     add_test(NAME pdfio-PdfProjectBuilderTest COMMAND PdfProjectBuilderTest)
     set_tests_properties(pdfio-PdfProjectBuilderTest PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+    # PdfPageSaver is deliberately not covered here: KraConverter and KisPart want the full
+    # application environment (resource servers, document storage), and a bare QTest hung
+    # instead of failing. Verifying the ink-only save needs a running Krita, which is what the
+    # clipboard work in libs/ui/kis_clipboard.cc unblocked; it is the next thing to wire up.
 endif()
