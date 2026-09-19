@@ -7,13 +7,16 @@
 #include "PdfPageStripDecoration.h"
 #include "PdfPageNavigator.h"
 
+#include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
+#include <QWidget>
 #include <QPainter>
 #include <QPixmap>
 
 #include <kis_canvas2.h>
 #include <kis_coordinates_converter.h>
+#include <kis_canvas_widget_base.h>
 #include <kis_image.h>
 #include <kis_paint_device.h>
 

@@ -26,6 +26,13 @@ class KisView;
  *
  * The thumbnails are the ones written when a page is saved. The page that has never been drawn on
  * has none yet, and shows as an empty sheet.
+ *
+ * Measured, and disappointing: at a working zoom the page is far larger than the viewport -- 81978
+ * by 116000 widget pixels against a 644 by 580 viewport in one measurement, about fifty times -- so
+ * the neighbours are tens of thousands of pixels away and the canvas will not pan there. It is
+ * correct and it costs nothing, and it is of little use until the page is small enough to leave
+ * room around it. Design B is the answer to the same want: with the neighbours inside the image,
+ * scrolling reaches them. See docs/PDFIO-DESIGN-STRIP.md.
  */
 class PdfPageStripDecoration : public KisCanvasDecoration
 {
