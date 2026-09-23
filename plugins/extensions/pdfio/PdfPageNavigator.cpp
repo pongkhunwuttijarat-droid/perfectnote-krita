@@ -12,7 +12,6 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QWidget>
-#include <QStandardPaths>
 #include <QTimer>
 
 #include "backend/PdfRenderBackend.h"
@@ -122,8 +121,10 @@ PdfPageNavigator *PdfPageNavigator::instance()
 
 QString PdfPageNavigator::projectRoot()
 {
-    return QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation))
-        .filePath(QStringLiteral("pdfio-projects"));
+    /// The policy -- Documents on the desktop, app-private on Android, and the fallback when
+    /// Documents is not there -- belongs to PdfSession, which is where it can be tested without a
+    /// navigator, a renderer or a window behind it.
+    return PdfSession::projectRoot();
 }
 
 bool PdfPageNavigator::hasNotebook() const
@@ -388,17 +389,30 @@ bool PdfPageNavigator::openNotebook(const QString &pdfPath, QString *why)
         return false;
     }
 
-    const QString root = projectRoot();
-    if (!QDir().mkpath(root)) {
-        fail(why, QStringLiteral("cannot create %1").arg(root));
-        return false;
-    }
+    /// Best effort: a notebook that is not there yet is made under the current root. Not being
+    /// able to make that directory is not fatal -- migrateFromLegacy falls back to the legacy root,
+    /// which is where an older notebook already is.
+    QDir().mkpath(projectRoot());
 
     /// One directory per source PDF, keyed by its content, so reopening returns to the same
     /// notebook instead of starting a second one.
     const QString base = QFileInfo(pdfPath).completeBaseName();
     const QString key = QString::fromLatin1(PdfSessionManifest::sha256OfFile(pdfPath).left(8));
-    const QString projectDir = QDir(root).filePath(base + QLatin1Char('-') + key);
+    const QString name = base + QLatin1Char('-') + key;
+
+    /// A notebook that predates the folder moving to Documents is moved here on this first open.
+    /// A move that cannot be made leaves this pointing at the legacy copy, so the notebook opens
+    /// where it is rather than failing -- and the old copy is still there, untouched.
+    QString moveError;
+    const QString projectDir = PdfSession::migrateFromLegacy(name, &moveError);
+    if (!moveError.isEmpty()) {
+        say(QStringLiteral("notebook stays at %1: %2").arg(projectDir, moveError));
+    }
+
+    if (!QDir().mkpath(projectDir)) {
+        fail(why, QStringLiteral("cannot create %1").arg(projectDir));
+        return false;
+    }
 
     const PdfSessionManifest manifest =
         QFileInfo::exists(PdfSession::manifestPath(projectDir))

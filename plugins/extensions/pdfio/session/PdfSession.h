@@ -37,6 +37,42 @@ public:
     /// Reads a project back and checks that its source is still the one recorded.
     static PdfSessionManifest openProject(const QString &projectDir, QString *why = nullptr);
 
+    /**
+     * Where the notebook directories live.
+     *
+     * Documents, so the working format is somewhere the user can find it, on the desktop. The
+     * app-private location on Android, and that is not a preference: the manifest targets SDK 36
+     * and asks for neither requestLegacyExternalStorage nor MANAGE_EXTERNAL_STORAGE, so scoped
+     * storage refuses a direct-path write into shared Documents and a page save would simply fail.
+     * Getting a notebook into Documents on Android is the SAF bundle's job, not this one's.
+     *
+     * Falls back to legacyProjectRoot() when the Documents location is empty, missing or not
+     * writable: a machine without a Documents folder must not be unable to open a notebook.
+     */
+    static QString projectRoot();
+
+    /// The root used before the notebook folder moved to Documents, and still the root on Android.
+    static QString legacyProjectRoot();
+
+    /**
+     * The directory the notebook called \a name is opened from, moving it out of the legacy root
+     * the first time it is opened under the new one.
+     *
+     *  - already under projectRoot(), or under neither root: the projectRoot() path.
+     *  - under the legacy root: moved into projectRoot(), checked to be a readable notebook before
+     *    and after the move, and the new path is returned.
+     *  - the move or the check failed: the legacy path, with \a why set, so the caller keeps
+     *    reading the notebook where it is. Nothing is deleted, and a failed move leaves exactly one
+     *    complete copy.
+     */
+    static QString migrateFromLegacy(const QString &name, QString *why = nullptr);
+
+    /**
+     * Points the Documents half of projectRoot() at \a path, for tests; an empty string restores
+     * the real location. Nothing in the plugin calls it.
+     */
+    static void setDocumentsLocationForTests(const QString &path);
+
     static QString manifestPath(const QString &projectDir);
     static QString sourcePath(const QString &projectDir, const QString &sourceFile);
     static QString pageFileName(int index);

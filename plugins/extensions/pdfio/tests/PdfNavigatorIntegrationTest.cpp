@@ -95,10 +95,12 @@ namespace {
 /// enough that finding it back is not a coincidence.
 const QRect InkMark(8, 8, 24, 24);
 
+/// The root the plugin itself would use, asked of the plugin rather than spelled out again: the
+/// notebook folder moved to Documents on the desktop, and a copy of the old rule here would have
+/// gone on writing to the old place.
 QString projectsRoot()
 {
-    return QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation))
-        .filePath(QStringLiteral("pdfio-projects"));
+    return PdfSession::projectRoot();
 }
 
 KisPaintLayer *inkLayer(const KisImageSP &image)
@@ -154,6 +156,13 @@ void PdfNavigatorIntegrationTest::initTestCase()
     /// and the store is emptied first: a project directory is derived from its source, so an
     /// artifact left by an earlier run would otherwise be read back as this run's ink.
     QVERIFY(QStandardPaths::isTestModeEnabled());
+
+    /// The notebook folder now defaults to Documents, which is the user's own directory. Point the
+    /// Documents half of the policy at this run's temporary directory so the test creates and
+    /// removes notebooks inside it and nowhere else. The root policy itself is PdfSessionTest's to
+    /// prove; this test only needs a place to work.
+    PdfSession::setDocumentsLocationForTests(m_dir.path());
+    QVERIFY(projectsRoot().startsWith(m_dir.path()));
 
     /// Krita's own ui tests put the resource system up before they touch a document
     /// (sdk/tests/kistest.h, the TESTUI branch of registerResources); a document created without

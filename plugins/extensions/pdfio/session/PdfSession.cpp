@@ -11,8 +11,58 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QStandardPaths>
 
 namespace {
+
+/// The one folder, under Documents, that the notebook directories live in.
+///
+/// Part of the contract with the user rather than an implementation detail: the working format is
+/// meant to be found, so the folder says what it holds and there is exactly one of it.
+const char *NotebookFolderName = "PerfectNote Notebooks";
+
+/// Where a test has pointed the Documents location, if anywhere. See
+/// PdfSession::setDocumentsLocationForTests().
+QString &documentsLocationOverride()
+{
+    static QString path;
+    return path;
+}
+
+QString documentsLocation()
+{
+    return documentsLocationOverride().isEmpty()
+        ? QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation)
+        : documentsLocationOverride();
+}
+
+/**
+ * Whether a directory holds a readable manifest and the source that manifest names.
+ *
+ * Deliberately not openProject(): that also checksums the source, and a migration should not read
+ * a notebook twice. What is being guarded against is a directory that is not a notebook at all.
+ */
+bool notebookLooksComplete(const QString &dir, QString *why)
+{
+    QString localWhy;
+    const PdfSessionManifest manifest = PdfSessionManifest::readFrom(PdfSession::manifestPath(dir), &localWhy);
+    if (!manifest.isValid(&localWhy)) {
+        if (why) {
+            *why = QStringLiteral("%1 does not hold a readable notebook (%2)").arg(dir, localWhy);
+        }
+        return false;
+    }
+
+    const QString source = PdfSession::sourcePath(dir, manifest.sourceFile);
+    if (!QFileInfo::exists(source)) {
+        if (why) {
+            *why = QStringLiteral("%1 names a source that is not there (%2)").arg(dir, manifest.sourceFile);
+        }
+        return false;
+    }
+
+    return true;
+}
 
 QString numbered(const QString &directory, const QString &prefix, int index, const QString &suffix)
 {
@@ -135,4 +185,88 @@ PdfSessionManifest PdfSession::openProject(const QString &projectDir, QString *w
     }
 
     return manifest;
+}
+
+QString PdfSession::legacyProjectRoot()
+{
+    return QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation))
+        .filePath(QStringLiteral("pdfio-projects"));
+}
+
+QString PdfSession::projectRoot()
+{
+#ifdef Q_OS_ANDROID
+    /// Not a preference. The manifest targets SDK 36 and asks for neither
+    /// requestLegacyExternalStorage nor MANAGE_EXTERNAL_STORAGE, so scoped storage refuses a
+    /// direct-path write into a shared Documents tree -- and this format writes on every page
+    /// save, so a notebook there would fail to save rather than merely be untidy. The path a
+    /// notebook takes into Documents on Android is the SAF bundle, not this function.
+    return legacyProjectRoot();
+#else
+    const QString documents = documentsLocation();
+    const QFileInfo location(documents);
+    if (documents.isEmpty() || !location.isDir() || !location.isWritable()) {
+        /// No Documents folder, or one nothing may be written to. Falling back is the whole point:
+        /// a notebook must open on a machine that has no Documents directory.
+        return legacyProjectRoot();
+    }
+
+    return QDir(documents).filePath(QString::fromLatin1(NotebookFolderName));
+#endif
+}
+
+void PdfSession::setDocumentsLocationForTests(const QString &path)
+{
+    documentsLocationOverride() = path;
+}
+
+QString PdfSession::migrateFromLegacy(const QString &name, QString *why)
+{
+    const QString currentDir = QDir(projectRoot()).filePath(name);
+    const QString legacyDir = QDir(legacyProjectRoot()).filePath(name);
+
+    /// Already where notebooks live now. This also covers the case where both roots are the same
+    /// directory -- Android, and the Documents fallback -- because then currentDir is legacyDir.
+    if (QFileInfo::exists(manifestPath(currentDir))) {
+        return currentDir;
+    }
+
+    /// Nothing to move: a notebook that has never been opened before, and is about to be created
+    /// under the current root.
+    if (!QFileInfo::exists(manifestPath(legacyDir))) {
+        return currentDir;
+    }
+
+    /// One look before the move. A directory that is not a notebook is not moved, and a failure
+    /// here leaves the legacy copy exactly as it was.
+    if (!notebookLooksComplete(legacyDir, why)) {
+        return legacyDir;
+    }
+
+    if (!QDir().mkpath(projectRoot())) {
+        if (why) {
+            *why = QStringLiteral("%1 cannot be created").arg(projectRoot());
+        }
+        return legacyDir;
+    }
+
+    if (!QDir().rename(legacyDir, currentDir)) {
+        if (why) {
+            *why = QStringLiteral("%1 cannot be moved to %2").arg(legacyDir, currentDir);
+        }
+        return legacyDir;
+    }
+
+    if (!notebookLooksComplete(currentDir, why)) {
+        /// The rename itself is atomic, so this is the manifest or the source being unreadable
+        /// rather than a half-moved directory. Put it back anyway: one complete copy at the old
+        /// root is worth more than a moved one nobody has checked.
+        const QString failure = why ? *why : QString();
+        if (QDir().rename(currentDir, legacyDir) && why) {
+            *why = QStringLiteral("%1; the notebook was put back at %2").arg(failure, legacyDir);
+        }
+        return legacyDir;
+    }
+
+    return currentDir;
 }
