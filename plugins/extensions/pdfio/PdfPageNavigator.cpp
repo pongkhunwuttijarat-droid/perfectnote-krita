@@ -672,12 +672,24 @@ bool PdfPageNavigator::showPage(int index, QString *why)
     /// signal the switch might have missed. Scope one is design A: one document, one page, so the
     /// document's flag is the page's flag. The strip (design B) keeps several pages in one document
     /// and has its own save ordering -- it is off at scope one, and it is left alone here.
-    if (m_stripPages.isEmpty() && m_document && m_document->image() && m_index != index
-        && m_window.isOpen(m_index)) {
+    if (m_stripPages.isEmpty() && m_document && m_document->image() && m_index != index) {
         m_window.setDirty(m_index, m_document->isModified());
     }
 
-    if (m_stripPages.isEmpty() && m_index != index) {
+    /// And the window is told about the page being opened whenever it does not already hold it,
+    /// not only when the index changes.
+    ///
+    /// The index test alone leaves a hole, and it is one the notebook path walks straight into:
+    /// openNotebook() clears the window and then shows page 0 of the new notebook, so when the page
+    /// that was already open was page 0 as well, m_index == index and the window was never told
+    /// about the new page. It stayed empty, and the next turn then had nothing to evict -- no
+    /// eviction, no save before it -- while the document holding that page's ink was replaced by
+    /// the new page's, which is the ink loss this window exists to prevent.
+    ///
+    /// Found by tests/PdfNavigatorIntegrationTest.cpp: it turns from page 1 of a notebook that was
+    /// opened while page 1 was already up, and the window's own counters said no eviction had
+    /// happened.
+    if (m_stripPages.isEmpty() && !m_window.isOpen(index)) {
         QString windowError;
         if (!m_window.open(index, &windowError)) {
             fail(why, windowError);

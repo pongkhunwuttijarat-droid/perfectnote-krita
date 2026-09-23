@@ -183,8 +183,75 @@ if (Poppler_Qt${QT_MAJOR_VERSION}_FOUND)
     set_tests_properties(pdfio-PdfExporterTest PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
-    # PdfPageSaver is deliberately not covered here: KraConverter and KisPart want the full
-    # application environment (resource servers, document storage), and a bare QTest hung
-    # instead of failing. Verifying the ink-only save needs a running Krita, which is what the
-    # clipboard work in libs/ui/kis_clipboard.cc unblocked; it is the next thing to wire up.
+    # The one test that turns a real page. PdfPageWindowTest proves the eviction rule by itself
+    # and PdfProjectBuilderTest proves the layer contract, but neither ever drives the navigator:
+    # the save that has to run before an eviction is PdfPageNavigator::saveCurrentPage, and the
+    # document it saves into is a real KisDocument built through KisPart. Both are linked in
+    # here, which is what the earlier "PdfPageSaver is deliberately not covered" note said was
+    # missing: a QTest with no KisPart, no main window and no plugin path hung rather than failed.
+    #
+    # The plugins are found through KRITA_PLUGIN_PATH. The save is Krita's .kra export, which is
+    # itself a plugin, so the test points that variable at the built plugins and depends on the
+    # export plugin being built rather than at an installed copy of Krita.
+    # The main window is set up from resources that live in the application's own .qrc, not in
+    # kritaui: without :/kxmlgui5/krita5.xmlgui a KisMainWindow has no toolbar action and adding a
+    # view walks into KDE's ToolBarHandler with an empty action list and crashes. Krita's own ui
+    # tests add the same file (libs/ui/tests/CMakeLists.txt, kis_view_signals_test).
+    add_executable(PdfNavigatorIntegrationTest
+        PdfNavigatorIntegrationTest.cpp
+        "${CMAKE_BINARY_DIR}/krita/krita.qrc"
+        ${CMAKE_CURRENT_SOURCE_DIR}/../backend/PdfRenderBackendCreate.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../backends/poppler/PopplerRenderBackend.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../PdfPageNavigator.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../PdfPageStripDecoration.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../session/PdfInkLoader.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../session/PdfPageSaver.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../session/PdfPageWindow.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../session/PdfProjectBuilder.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../session/PdfSession.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../session/PdfSessionManifest.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../session/PdfStripBuilder.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../session/PdfStripLayout.cpp
+        )
+
+    # Two plugins the page turn cannot run without, and neither is in the test binary: the ink-only
+    # save is Krita's .kra export (Krita/FileFilter) and the ICC profiles the canvas asks for come
+    # from the color space engine (Krita/ColorSpace). Both are found through KRITA_PLUGIN_PATH,
+    # which points at the directory they are built into.
+    add_dependencies(PdfNavigatorIntegrationTest
+        kritakraexport
+        kritalcmsengine)
+
+    target_include_directories(PdfNavigatorIntegrationTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+    target_link_libraries(PdfNavigatorIntegrationTest PRIVATE
+        Qt${QT_MAJOR_VERSION}::Core
+        Qt${QT_MAJOR_VERSION}::Gui
+        Qt${QT_MAJOR_VERSION}::Widgets
+        Qt${QT_MAJOR_VERSION}::Test
+        Poppler::Qt${QT_MAJOR_VERSION}
+        kritaui
+        kritaimage
+        kritawidgetutils
+        KF${KF_MAJOR}::Archive)
+
+    # KRITA_RESOURCE_DIRS_FOR_TESTS is not set here: it holds a semicolon-separated list, which a
+    # compile definition cannot carry (CMake splits it and moc is handed an argument that is not a
+    # macro). It comes from the generated <KoTestConfig.h> instead, the same header Krita's own
+    # tests read it from (sdk/tests/kistest.h).
+    target_compile_definitions(PdfNavigatorIntegrationTest PRIVATE
+        PDFIO_HAVE_POPPLER
+        FILES_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/"
+        PDFIO_PLUGIN_DIR="$<TARGET_FILE_DIR:kritakraexport>")
+
+    set_target_properties(PdfNavigatorIntegrationTest PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+        AUTORCC ON)
+
+    add_test(NAME pdfio-PdfNavigatorIntegrationTest COMMAND PdfNavigatorIntegrationTest)
+    set_tests_properties(pdfio-PdfNavigatorIntegrationTest PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QTEST_FUNCTION_TIMEOUT=120000"
+        TIMEOUT 600)
+
 endif()
