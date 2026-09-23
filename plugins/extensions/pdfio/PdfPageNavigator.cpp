@@ -15,6 +15,8 @@
 #include <QStandardPaths>
 #include <QEventLoop>
 #include <QFileInfo>
+#include <QtMath>
+
 #include <QAbstractScrollArea>
 #include <QScrollBar>
 #include <QWidget>
