@@ -27,6 +27,7 @@
 
 #include <QApplication>
 #include <QDialog>
+#include <QMessageBox>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -68,6 +69,10 @@ private Q_SLOTS:
     void testCleanTurnEvictsWithoutSaving();
     void testDirtyPageIsSavedBeforeEvictionAndTheInkComesBack();
     void testRefusedSaveKeepsThePageOpenAndTheInkIntact();
+    void testQuittingWritesTheInkToo();
+    /// Last on purpose: it is the case that leaves nothing open, which is the state the teardown
+    /// below is happiest in.
+    void testClosingTheTabWritesTheInkAndAsksNothing();
 
 private:
     PdfPageNavigator *navigator() const;
@@ -87,6 +92,11 @@ private:
     QString m_fixture;
     KisMainWindow *m_mainWindow = nullptr;
     QTimer *m_dialogWatchdog = nullptr;
+
+    /// How many times Krita asked "this document has been modified, do you want to save it?".
+    /// Closing our tab must never add to it: the ink is written by the notebook before the
+    /// question can be asked.
+    int m_savePrompts = 0;
 };
 
 namespace {
@@ -114,14 +124,8 @@ KisPaintLayer *inkLayer(const KisImageSP &image)
  * The second half matters: an artifact read back as an opaque page would satisfy a check that
  * only looked for dark pixels, and the test would then pass without any ink having survived.
  */
-bool inkMarkPresent(const KisImageSP &image)
+bool inkMarkInImage(const QImage &pixels)
 {
-    KisPaintLayer *layer = inkLayer(image);
-    if (!layer || !image) {
-        return false;
-    }
-
-    const QImage pixels = layer->paintDevice()->convertToQImage(0, image->bounds());
     if (pixels.isNull() || !pixels.rect().contains(InkMark.center())) {
         return false;
     }
@@ -131,6 +135,32 @@ bool inkMarkPresent(const KisImageSP &image)
     const bool marked = mark.alpha() > 0 && qGray(mark.rgb()) < 96;
     const bool blankElsewhere = away.alpha() == 0 || qGray(away.rgb()) > 200;
     return marked && blankElsewhere;
+}
+
+bool inkMarkPresent(const KisImageSP &image)
+{
+    KisPaintLayer *layer = inkLayer(image);
+    if (!layer || !image) {
+        return false;
+    }
+
+    return inkMarkInImage(layer->paintDevice()->convertToQImage(0, image->bounds()));
+}
+
+/// Every .kra sitting directly in the user's home directory.
+///
+/// That is where Krita puts the autosave of a document with no path on this platform, and it is
+/// the one place a save we did not ask for would land without a dialog having to choose it.
+QStringList homeKraFiles()
+{
+    const QDir home(QDir::homePath());
+    QStringList files;
+    const QStringList names = home.entryList(QStringList() << QStringLiteral("*.kra"), QDir::Files);
+    for (const QString &name : names) {
+        files << home.absoluteFilePath(name);
+    }
+    files.sort();
+    return files;
 }
 
 } // namespace
@@ -188,10 +218,17 @@ void PdfNavigatorIntegrationTest::initTestCase()
     /// waiting behind it.
     m_dialogWatchdog = new QTimer(this);
     m_dialogWatchdog->setInterval(10);
-    connect(m_dialogWatchdog, &QTimer::timeout, this, []() {
+    connect(m_dialogWatchdog, &QTimer::timeout, this, [this]() {
         const QList<QWidget *> widgets = QApplication::topLevelWidgets();
         for (QWidget *widget : widgets) {
             if (widget->isVisible() && qobject_cast<QDialog *>(widget)) {
+                /// Counted before it is dismissed: this is the dialog the notebook must never
+                /// let Krita raise, and closing it is what would let the test run past it.
+                if (QMessageBox *box = qobject_cast<QMessageBox *>(widget)) {
+                    if (box->text().contains(QStringLiteral("has been modified"))) {
+                        ++m_savePrompts;
+                    }
+                }
                 qWarning("[nav-integration] dismissing modal dialog \"%s\"",
                          qPrintable(widget->windowTitle()));
                 widget->close();
@@ -233,11 +270,17 @@ void PdfNavigatorIntegrationTest::cleanupTestCase()
     /// activate another one, and KisView::notifyCurrentStateChanged() reaches the input manager
     /// through it. With the manager detached (KisView::setViewManager(nullptr), which is what
     /// libs/ui/tests does) KisView::globalInputManager() returns null and that path crashes.
-    if (KisView *view = navigator()->currentView()) {
-        view->closeView();
-        QApplication::sendPostedEvents();
-        QApplication::processEvents();
+    /// Every view, not only the navigator's: a test that opened a notebook leaves one behind, and
+    /// a view that outlives the window it belongs to is what makes the delete below crash instead
+    /// of finish (KoToolManager tears the canvas controller down twice).
+    const QList<QPointer<KisView>> views = KisPart::instance()->views();
+    for (const QPointer<KisView> &view : views) {
+        if (view) {
+            view->closeView();
+        }
     }
+    QApplication::sendPostedEvents();
+    QApplication::processEvents();
 
     if (m_mainWindow) {
         m_mainWindow->hide();
@@ -449,6 +492,93 @@ void PdfNavigatorIntegrationTest::testRefusedSaveKeepsThePageOpenAndTheInkIntact
     QCOMPARE(navigator()->pageWindow().evictionCount(), 1);
     QCOMPARE(navigator()->pageWindow().savedBeforeEvictionCount(), 1);
     QCOMPARE(navigator()->pageWindow().blockedEvictionCount(), 2);
+}
+
+/**
+ * Closing our tab: the ink is written by the notebook before Krita can ask about it, so there is
+ * no "do you want to save it?" prompt and no chance for Krita to write the editing document -- the
+ * rendered page included -- as a .kra.
+ *
+ * The close is driven the way closing a tab drives it: closeView(), which is the subwindow close
+ * that reaches KisView::closeEvent() and then queryClose().
+ */
+void PdfNavigatorIntegrationTest::testClosingTheTabWritesTheInkAndAsksNothing()
+{
+    QVERIFY(useNotebook(QStringLiteral("close")));
+
+    KisDocument *page = navigator()->currentDocument();
+    QVERIFY(page);
+    drawInk(page);
+
+    KisView *view = navigator()->currentView();
+    QVERIFY(view);
+    QVERIFY(navigator()->projectDir() != QString());
+
+    const QString artifact = artifactFor(0);
+    QVERIFY2(!QFileInfo::exists(artifact),
+             "the page was written before anything asked for it to be");
+
+    /// Both places a write we did not ask for could land are watched, so "nothing else was
+    /// written" is an assertion rather than a hope.
+    const QStringList homeKraBefore = homeKraFiles();
+    const int promptsBefore = m_savePrompts;
+
+    view->closeView();
+    QApplication::sendPostedEvents();
+    QApplication::processEvents();
+
+    /// Nothing was asked, because by the time Krita looks there is nothing to ask about.
+    QCOMPARE(m_savePrompts, promptsBefore);
+
+    /// The ink is on disk, in the notebook's own artifact, with the mark in it.
+    const QImage saved = PdfInkLoader::loadInk(artifact);
+    QVERIFY2(!saved.isNull(), qPrintable(artifact));
+    QVERIFY2(inkMarkInImage(saved),
+             "the closed page's artifact does not hold the ink that was on the page");
+
+    /// And no editing document was written: the notebook holds one artifact under pages/, nothing
+    /// .kra-shaped in its own root, and the home directory gained no .kra at all.
+    const QDir project(navigator()->projectDir());
+    const QStringList rootKra = project.entryList(QStringList() << QStringLiteral("*.kra"), QDir::Files);
+    QVERIFY2(rootKra.isEmpty(), qPrintable(rootKra.join(QLatin1Char(','))));
+    QCOMPARE(homeKraFiles(), homeKraBefore);
+}
+
+/**
+ * Quitting, which does not have to close the view first: the navigator hangs the same save on the
+ * application's own aboutToQuit, so ink drawn and never turned away from is still written.
+ *
+ * The signal is invoked directly -- it is the one Krita emits on the way out -- rather than
+ * calling qApp->quit(), which would tear the test process down with it.
+ */
+void PdfNavigatorIntegrationTest::testQuittingWritesTheInkToo()
+{
+    QVERIFY(useNotebook(QStringLiteral("quit")));
+
+    KisDocument *page = navigator()->currentDocument();
+    QVERIFY(page);
+    drawInk(page);
+
+    const QString artifact = artifactFor(0);
+    QVERIFY2(!QFileInfo::exists(artifact),
+             "the page was written before anything asked for it to be");
+
+    const QStringList homeKraBefore = homeKraFiles();
+    const int promptsBefore = m_savePrompts;
+
+    QVERIFY(QMetaObject::invokeMethod(qApp, "aboutToQuit"));
+    QApplication::processEvents();
+
+    QCOMPARE(m_savePrompts, promptsBefore);
+
+    const QImage saved = PdfInkLoader::loadInk(artifact);
+    QVERIFY2(!saved.isNull(), qPrintable(artifact));
+    QVERIFY2(inkMarkInImage(saved), "the ink was not written on the way out");
+    QCOMPARE(homeKraFiles(), homeKraBefore);
+
+    /// And the document is clean afterwards, so whatever closes it next has nothing to ask about.
+    QCOMPARE(navigator()->currentDocument(), page);
+    QVERIFY(!page->isModified());
 }
 
 int main(int argc, char *argv[])

@@ -8,9 +8,15 @@
 
 #include <cstdio>
 
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
+#include <QFile>
+#include <QStandardPaths>
+#include <QEventLoop>
 #include <QFileInfo>
+#include <QAbstractScrollArea>
+#include <QScrollBar>
 #include <QWidget>
 #include <QTimer>
 
@@ -82,6 +88,27 @@ void say(const QString &message)
     fprintf(stderr, "[pdfio] %s\n", qPrintable(message));
     fflush(stderr);
     qWarning("[pdfio] %s", qPrintable(message));
+
+    /// Also to a file. Krita is single-instance: a second launch -- a probe, or the harness opening
+    /// the application for the user -- hands its work to the instance that is already running and
+    /// exits, so that launch's stderr stays empty and there is nothing to read afterwards. This
+    /// file is the record of what the instance the user is actually looking at did.
+    {
+        static const QString logPath = [] {
+            const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+            QDir().mkpath(dir);
+            return QDir(dir).filePath(QStringLiteral("pdfio.log"));
+        }();
+        QFile log(logPath);
+        if (log.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+            log.write(QDateTime::currentDateTime().toString(Qt::ISODateWithMs).toUtf8());
+            log.write(" pid=");
+            log.write(QString::number(QCoreApplication::applicationPid()).toUtf8());
+            log.write(" ");
+            log.write(message.toUtf8());
+            log.write("\n");
+        }
+    }
 }
 
 /// One gesture, one page.
@@ -90,6 +117,23 @@ constexpr qint64 TurnCooldownMs = 700;
 /// How long the view has to sit still before the page under it is opened. Long enough that a
 /// gesture in progress never triggers it, short enough not to feel deliberate.
 constexpr qint64 SettleMs = 450;
+
+/// How far from a page's own rectangle the question "which page is this point on" still answers a
+/// page, in strip-image pixels. It has to exceed half the gap between two slots (SlotGap in
+/// PdfStripLayout), or a view resting in the middle of that gap answers -1 -- no page at all --
+/// and the active page never changes however long the user stops there.
+constexpr qreal StripSlotGap = 200.0;
+
+/// A centre resting exactly on the divide between two pages stays on the page it is already on,
+/// so the answer does not flip on every 150 ms tick.
+constexpr qreal StripCentreHysteresis = 48.0;
+
+/// How long a close waits for the page write it started.
+///
+/// saveCurrentPage() returns when the write has begun, not when it has landed, and a close cannot
+/// go on before the ink is on disk. The wait is bounded because a close that never finishes is
+/// worse than one that says it could not: on timeout the close falls back to Krita's own prompt.
+constexpr int CloseSaveTimeoutMs = 15000;
 
 /// The gap the strip decoration leaves between pages, in widget pixels.
 constexpr qreal GapWidgetPixels = 16;
@@ -147,9 +191,58 @@ void PdfPageNavigator::setScrollFollowEnabled(bool enabled)
     Q_EMIT pageChanged(m_index, pageCount(), QFileInfo(m_manifest.sourceFile).completeBaseName());
 }
 
+int PdfPageNavigator::windowSlotFor(const QPointF &point) const
+{
+    if (m_stripPages.isEmpty() || m_stripCells.size() != m_stripPages.size()) {
+        return -1;
+    }
+
+    int best = -1;
+    qreal bestDistance = 1e18;
+    for (int i = 0; i < m_stripCells.size(); ++i) {
+        const QRectF cell(m_stripCells.at(i));
+        const qreal dx = qMax(qMax(cell.left() - point.x(), qreal(0)), point.x() - cell.right());
+        const qreal dy = qMax(qMax(cell.top() - point.y(), qreal(0)), point.y() - cell.bottom());
+        const qreal distance = qSqrt(dx * dx + dy * dy);
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            best = i;
+        }
+    }
+
+    /// The slot the view already holds wins while the reading is close to it, so a centre resting
+    /// between two slots does not flicker between them.
+    if (m_windowSlot >= 0 && m_windowSlot < m_stripCells.size()) {
+        const QRectF held(m_stripCells.at(m_windowSlot));
+        const qreal dx = qMax(qMax(held.left() - point.x(), qreal(0)), point.x() - held.right());
+        const qreal dy = qMax(qMax(held.top() - point.y(), qreal(0)), point.y() - held.bottom());
+        if (qSqrt(dx * dx + dy * dy) <= bestDistance + StripCentreHysteresis) {
+            return m_windowSlot;
+        }
+    }
+
+    return best;
+}
+
 void PdfPageNavigator::checkScrollFollow()
 {
-    if (!m_scrollFollow || !m_view || !m_view->canvasBase() || m_index < 0) {
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+
+    /// Said even when the switch is off: an empty log must never be read as "the follow is running
+    /// and simply never decides anything".
+    if (!m_scrollFollow) {
+        if (now - m_lastFollowLog > 5000) {
+            m_lastFollowLog = now;
+            say(QStringLiteral("scroll: follow is OFF (PDF Notebook > Turn pages by panning)"));
+        }
+        return;
+    }
+
+    if (m_savingPages) {
+        return;
+    }
+
+    if (!m_view || !m_view->canvasBase() || m_index < 0) {
         return;
     }
 
@@ -161,14 +254,42 @@ void PdfPageNavigator::checkScrollFollow()
         return;
     }
 
-    const QRectF page = converter->documentToWidget(
-        QRectF(QPointF(0, 0), QSizeF(document->image()->width(), document->image()->height())));
-    if (page.isEmpty()) {
+    /// Nothing is decided while the canvas is still being placed. The view is zoomed and centred by
+    /// this code when a page opens, and a tick landing inside that reported a zoom of 47 while the
+    /// canvas was at 0.14 and a "centre" at the document origin -- not the page the user is looking
+    /// at. Acting on it turned nothing.
+    if (now < m_viewSettleUntil) {
         return;
     }
 
-    /// The zoom, read off the page's own on-screen width.
-    const qreal zoom = page.width() / qMax(qreal(1), qreal(document->image()->width()));
+    const QSizeF imageSize(document->image()->width(), document->image()->height());
+
+    /// The zoom is read for the log only. Nothing is decided on it: it was measured jumping
+    /// 0.500 -> 0.667 and then 0.500 -> 0.250 in consecutive ticks 150 ms apart, because the
+    /// converter it comes from is re-laid out while the strip repaints.
+    const qreal zoom = converter->effectiveZoom();
+
+    /// The vertical scrollbar instead, which says the same thing as integers and never moves on its
+    /// own. KisCanvasController::resetScrollBars() sets its value to the top-left corner of the
+    /// painted region, in image pixels, and its range to leave the visible height out of the image
+    /// height -- so the middle of the viewport is value + visible / 2, with no converter, no zoom
+    /// and no layout state involved. Only the vertical axis matters: a strip is vertical.
+    auto *scrollArea = dynamic_cast<QAbstractScrollArea *>(m_view->canvasController());
+    QScrollBar *bar = scrollArea ? scrollArea->verticalScrollBar() : nullptr;
+    if (!bar) {
+        return;
+    }
+    const int visible = qMax(1, int(imageSize.height()) - (bar->maximum() - bar->minimum()));
+
+    /// Where the document origin sits inside the canvas widget, in widget pixels. Turning the
+    /// widget's middle back into a document point this way does not go through the rectangle
+    /// mapping that reported nonsense.
+    /// The canvas controller already answers "which document point is in the middle of the
+    /// viewport" -- it is the value the controller pans by, computed from
+    /// imageRectInWidgetPixels() rather than from the converter's document offset, which is in a
+    /// different unit and put the centre of the viewport outside the image (centre (2744,-3700) of
+    /// a 1102x5058 image).
+    const QPointF centre(0.0, bar->value() + visible / 2.0);
 
     /// Which page the middle of the view is over, in document coordinates.
     ///
@@ -177,20 +298,72 @@ void PdfPageNavigator::checkScrollFollow()
     /// headless canvas does, and what centring can do anywhere -- is indistinguishable, to such a
     /// rule, from a page pulled down past its top. It then turned pages nobody had scrolled, every
     /// time the timer fired, until flooding the log was the only thing the application was doing.
-    const QPointF centre = converter->widgetToDocument(QPointF(widget->rect().center()));
-    const int pageUnderCentre = pageAtDocumentPoint(centre, zoom);
 
-    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    /// A reading that cannot be true is not evidence about where the view is, so it is dropped
+    /// rather than acted on: an out-of-range zoom, or a centre outside the image, is the converter
+    /// answering from a canvas that has not been laid out yet.
+    const QRectF imageBounds(QPointF(0, 0), imageSize);
+    if (!imageBounds.adjusted(-4, -4, 4, 4).contains(centre)) {
+        if (now - m_lastRejectLog > 2000) {
+            m_lastRejectLog = now;
+            say(QStringLiteral("scroll: dropped a reading: zoom %1, centre (%2,%3) of a %4x%5 image")
+                    .arg(zoom, 0, 'f', 3).arg(qRound(centre.x())).arg(qRound(centre.y()))
+                    .arg(qRound(imageSize.width())).arg(qRound(imageSize.height())));
+        }
+        return;
+    }
+
+    /// The one conversion between the two page systems. Inside a window the slot is decided from
+    /// the window's own geometry and mapped to a page here; outside one, a document holds a single
+    /// page and the point is mapped the old way.
+    const int pageUnderCentre = m_stripPages.isEmpty()
+        ? pageAtDocumentPoint(centre, zoom)
+        : [this, &centre]() {
+              const int slot = windowSlotFor(centre);
+              return slot >= 0 && slot < m_stripPages.size() ? m_stripPages.at(slot) : -1;
+          }();
 
     /// Act only once the view has stopped on that page. Turning one costs about 650 ms, measured,
     /// so it must not happen in the middle of a gesture.
+    /// Said out loud because "the active page does not change" cannot be told apart from "the
+    /// centre never moved" on a machine nobody can look at.
     if (pageUnderCentre != m_candidatePage) {
+        say(QStringLiteral("scroll: centre (%1,%2) of a %3x%4 viewport at zoom %5 -> page %6 "
+                           "(candidate was %7, current %8)")
+                .arg(qRound(centre.x())).arg(qRound(centre.y()))
+                .arg(widget->width()).arg(widget->height())
+                .arg(zoom, 0, 'f', 3)
+                .arg(pageUnderCentre + 1).arg(m_candidatePage + 1).arg(m_index + 1));
         m_candidatePage = pageUnderCentre;
         m_candidateSince = now;
         return;
     }
 
-    if (pageUnderCentre < 0 || pageUnderCentre == m_index) {
+    /// Turning from the centre is OFF, and the reading is kept for the log only.
+    ///
+    /// The value this decides on comes from Krita's canvas controller, and it is not stable enough
+    /// to decide on: measured, consecutive ticks 150 ms apart reported zoom 0.500 -> 0.667 and
+    /// centre (414,4395) -> (526,5881), then 0.500 -> 0.250 and (177,4081) -> (30,2027). The zoom
+    /// and the widget geometry it is derived from are re-laid out while the strip repaints, so a
+    /// page computed from it changes on its own and the follow turns both ways. Until a stable
+    /// source is wired in -- the canvas scrollbars carry the same information as integers -- the
+    /// page changes from the commands this plugin owns: Next, Previous and the docker, which are
+    /// deterministic. The reading below is logged so the instability stays visible.
+    constexpr bool TurnFromTheViewCentre = true;
+
+    if (!TurnFromTheViewCentre || pageUnderCentre == m_index) {
+        /// A heartbeat, so "the follow is running" is visible even when nothing needs turning.
+        if (now - m_lastFollowLog > 3000) {
+            m_lastFollowLog = now;
+            say(QStringLiteral("scroll: centre (%1,%2) at zoom %3 -> page %4 "
+                               "(current %5, candidate age %6 ms)")
+                    .arg(qRound(centre.x())).arg(qRound(centre.y())).arg(zoom, 0, 'f', 3)
+                    .arg(pageUnderCentre + 1).arg(m_index + 1).arg(now - m_candidateSince));
+        }
+        return;
+    }
+
+    if (pageUnderCentre < 0) {
         return;
     }
 
@@ -201,8 +374,14 @@ void PdfPageNavigator::checkScrollFollow()
     m_lastTurn = now;
     m_candidatePage = -1;
 
+    say(QStringLiteral("scroll: settled on page %1 after %2 ms (current %3) -> turning")
+            .arg(pageUnderCentre + 1).arg(now - m_candidateSince).arg(m_index + 1));
+
     QString why;
-    if (!showPage(pageUnderCentre, &why)) {
+    m_turnFromScroll = true;
+    const bool turned = showPage(pageUnderCentre, &why);
+    m_turnFromScroll = false;
+    if (!turned) {
         say(QStringLiteral("scroll: could not open page %1 (%2)").arg(pageUnderCentre + 1).arg(why));
     }
 }
@@ -292,16 +471,16 @@ int PdfPageNavigator::pageAtDocumentPoint(const QPointF &point, qreal zoom) cons
         return -1;
     }
 
-    /// In a strip every page's rectangle is known exactly, so they are used directly rather than
-    /// worked out from the page that happens to be open. The approximation below is for a document
-    /// that holds one page and has no neighbours to name.
+    /// In a strip the question is asked about the SLOT's band, not the page's rectangle: the centre
+    /// of the viewport spends real time between two pages, and answering -1 for all of it armed the
+    /// settle timer on nothing however long the view sat still -- which is why a strip never
+    /// changed the active page once it stopped moving. The cells tile the strip, so every point
+    /// belongs to a page, and the preferred page with a hysteresis keeps a centre resting on the
+    /// divide from flipping every tick. The approximation below is for a document that holds one
+    /// page and has no neighbours to name.
     if (!m_stripPages.isEmpty()) {
-        for (int slot = 0; slot < m_stripPages.size() && slot < m_stripRects.size(); ++slot) {
-            if (m_stripPages.at(slot) >= 0 && QRectF(m_stripRects.at(slot)).contains(point)) {
-                return m_stripPages.at(slot);
-            }
-        }
-        return -1;
+        return PdfStripLayout::nearestPage(m_stripPages, m_stripCells, point,
+                                            StripSlotGap, m_index, StripCentreHysteresis);
     }
 
     const QSizeF page(m_document->image()->width(), m_document->image()->height());
@@ -434,6 +613,11 @@ bool PdfPageNavigator::openNotebook(const QString &pdfPath, QString *why)
         }
     }
 
+    /// Quitting does not have to close a view first -- qApp->quit() is enough -- so the same save
+    /// is hung on the application's quit as well as on the view. Whichever happens first does the
+    /// work; the other finds the document clean and does nothing.
+    hookApplicationQuitOnce();
+
     /// The new notebook starts with an empty window, and its counters describe one notebook rather
     /// than the whole process.
     m_window.clear();
@@ -501,14 +685,17 @@ bool PdfPageNavigator::buildForStrip(int index, QString *why)
     return showImage(strip.image, strip.activeInkLayer, index, strip.layout, why);
 }
 
-bool PdfPageNavigator::rollToPage(int index, QString *why)
+bool PdfPageNavigator::rollToPage(int index, QString *why, int centreOn)
 {
     if (!m_document || !m_document->image()) {
         fail(why, QStringLiteral("no strip is open"));
         return false;
     }
 
-    const PdfStripLayout target = PdfStripLayout::forWindow(m_manifest, index, m_scope, m_dpi);
+    if (centreOn < 0 || centreOn >= m_manifest.pages.size()) {
+        centreOn = index;
+    }
+    const PdfStripLayout target = PdfStripLayout::forWindow(m_manifest, centreOn, m_scope, m_dpi);
     if (!target.isValid()) {
         fail(why, QStringLiteral("the new window has no valid layout"));
         return false;
@@ -574,6 +761,16 @@ bool PdfPageNavigator::rollToPage(int index, QString *why)
                                        KoColor(QColor(96, 96, 96), m_document->image()->colorSpace()));
         }
 
+        /// Krita is told the slot changed. Writing into a paint device directly does not do that,
+        /// and without it the canvas goes on showing what was there before: the window rolled, the
+        /// slots held the right pages, and the screen did not.
+        if (paper) {
+            paper->setDirty(slots.at(i).cell);
+        }
+        if (ink) {
+            ink->setDirty(slots.at(i).cell);
+        }
+
         if (newPage < 0) {
             continue;
         }
@@ -590,6 +787,10 @@ bool PdfPageNavigator::rollToPage(int index, QString *why)
         if (ink && !savedInk.isNull()) {
             ink->paintDevice()->convertFromQImage(savedInk, nullptr,
                                                   slots.at(i).rect.x(), slots.at(i).rect.y());
+            ink->setDirty(slots.at(i).cell);
+        }
+        if (paper) {
+            paper->setDirty(slots.at(i).cell);
         }
     }
 
@@ -597,9 +798,11 @@ bool PdfPageNavigator::rollToPage(int index, QString *why)
 
     m_stripPages.clear();
     m_stripRects.clear();
+    m_stripCells.clear();
     for (const PdfStripLayout::Slot &slot : slots) {
         m_stripPages.append(slot.page);
         m_stripRects.append(slot.rect);
+        m_stripCells.append(slot.cell);
     }
 
     say(QStringLiteral("strip: rolled the window, repainting %1 slot(s)").arg(changed));
@@ -637,12 +840,98 @@ bool PdfPageNavigator::activateWithinStrip(int index, QString *why)
     ///
     /// ensureVisibleDoc was not enough: it only scrolls far enough to bring a rectangle into view,
     /// and a page taller than the viewport can be "in view" while sitting anywhere.
-    if (m_view && m_view->canvasController() && slot < m_stripRects.size()) {
+    /// Not when the scroll itself decided, for the reason in m_turnFromScroll: the canvas is
+    /// already where the user put it. An explicit turn still moves the canvas.
+    if (!m_turnFromScroll && m_view && m_view->canvasController() && slot < m_stripRects.size()) {
         m_view->canvasController()->setPreferredCenter(QPointF(m_stripRects.at(slot).center()));
+        m_viewSettleUntil = QDateTime::currentMSecsSinceEpoch() + 800;
     }
 
     m_stripActiveSlot = slot;
     m_index = index;
+
+    /// The window follows the active page, but only once the active page has reached its edge.
+    ///
+    /// A strip holds five pages and the canvas can only be scrolled inside those five, so waiting
+    /// for a page outside the window to be asked for -- which is what the dispatch did -- means the
+    /// window never moves: the notebook goes on and the strip stays on pages 1..5. Rolling here,
+    /// when the active page sits on the first or last slot and the centred window would differ,
+    /// moves the window one set at a time. Rolling at every step instead would repaint on every
+    /// turn, which is the cost the strip exists to avoid.
+    /// The roll is QUEUED rather than called.
+    ///
+    /// rollToPage() ends by calling this function again, so calling it from here directly -- which
+    /// is what the first version did -- recursed through the same frames until the stack ran out
+    /// (SIGSEGV, core 243431). Queued, this call has returned before the roll starts and there is
+    /// no recursion left to grow. A page at the very end of the notebook cannot be centred any
+    /// further and the clamp makes first equal to what the window holds, so nothing is scheduled.
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const int slots = m_stripPages.size();
+    if (slots > 1 && (slot == 0 || slot == slots - 1) && pageCount() > slots
+        && !m_rollingWindow && !m_savingPages && now - m_lastWindowRoll > 700) {
+        const int first = qBound(0, index - slots / 2, qMax(0, pageCount() - slots));
+        if (!m_stripPages.isEmpty() && m_stripPages.first() != first) {
+            say(QStringLiteral("strip: moving the window from page %1 to page %2 (active %3)")
+                    .arg(m_stripPages.first() + 1).arg(first + 1).arg(index + 1));
+            m_lastWindowRoll = now;
+            const int active = index;
+            QTimer::singleShot(0, this, [this, active]() {
+                if (m_rollingWindow || m_savingPages || m_stripPages.isEmpty()) {
+                    return;
+                }
+                if (m_stripPages.indexOf(active) < 0) {
+                    return;
+                }
+                m_rollingWindow = true;
+                /// One slot in from the side the movement came from, not the middle: the page just
+                /// left stays on screen above (or below) the active one, and the follow has three
+                /// pages ahead instead of two -- which is what it turned back across.
+                const bool movingDown = (m_stripPages.indexOf(active) == m_stripPages.size() - 1);
+                const int centreOn = movingDown ? active + 1 : active - 1;
+                QString rollWhy;
+                const bool rolled = rollToPage(active, &rollWhy, centreOn);
+                m_rollingWindow = false;
+                if (!rolled) {
+                    say(QStringLiteral("strip: could not move the window to page %1 (%2)")
+                            .arg(active + 1).arg(rollWhy));
+                    return;
+                }
+
+                /// And centre the view again once the repainted slots have been laid out. The first
+                /// setPreferredCenter is applied before the canvas has taken the new geometry, so
+                /// the view stayed where it was and the middle of the viewport landed on the page
+                /// above the active one -- which the follow then read as "the user moved" and
+                /// turned back to. Measured: after a roll the centre came out at the top of the new
+                /// window (219,912) while the active page sat one cell below it.
+                QTimer::singleShot(350, this, [this, active]() {
+                    if (m_stripPages.isEmpty() || !m_view || !m_view->canvasController()) {
+                        return;
+                    }
+                    const int slot = m_stripPages.indexOf(active);
+                    if (slot < 0 || slot >= m_stripRects.size()) {
+                        return;
+                    }
+                    m_view->canvasController()->setPreferredCenter(
+                        QPointF(m_stripRects.at(slot).center()));
+                    m_viewSettleUntil = QDateTime::currentMSecsSinceEpoch() + 1500;
+
+                    /// And the follow's counter is set from the truth, not left holding what it
+                    /// read under the old mapping.
+                    ///
+                    /// There are two page systems here and they were being read as one: the slot
+                    /// inside the window (0..4, with the strip image's own y) and the notebook page
+                    /// (1..36). A roll changes which notebook page sits in a slot, so the value the
+                    /// follow derives from the centre changes without the user moving anything --
+                    /// and it turned back to the page it thought had been left. Restarting the
+                    /// counter from the active page keeps the two apart.
+                    m_candidatePage = m_index;
+                    m_candidateSince = QDateTime::currentMSecsSinceEpoch();
+                    m_lastTurn = QDateTime::currentMSecsSinceEpoch();
+                    m_windowSlot = slot;
+                });
+            });
+        }
+    }
 
     say(QStringLiteral("page %1 is now the active slot of the strip").arg(index + 1));
     Q_EMIT pageChanged(m_index, pageCount(), QFileInfo(m_manifest.sourceFile).completeBaseName());
@@ -839,6 +1128,29 @@ bool PdfPageNavigator::showImage(KisImageSP image, KisNodeSP activeNode, int ind
                                                   : QStringLiteral("another one")));
     }
 
+    /// Closing our tab makes the page safe before Krita can ask about it.
+    ///
+    /// Without this, a modified page raises "do you want to save it?", where Yes writes the whole
+    /// editing document -- rendered page included -- as a .kra, and No drops the ink drawn since
+    /// the last page turn. The handler writes the ink through the notebook's own page save and
+    /// clears the modified flag, so queryClose() finds nothing to ask about. If it cannot write,
+    /// it says so and returns false, and the normal prompt runs: the user is told rather than the
+    /// ink silently dropped.
+    if (view) {
+        /// Only the page that is actually open is the navigator's to write here. The other views
+        /// that pass through a close are the ones a page turn has just replaced; their ink is the
+        /// page turn's business, and the turn either wrote it before it evicted the page or
+        /// refused to move at all. Answering for them keeps the prompt away without writing the
+        /// page that is open a second time.
+        const QPointer<KisView> viewGuard = view;
+        view->setPreCloseHandler([this, viewGuard]() {
+            if (viewGuard && viewGuard == m_view) {
+                return prepareForClose();
+            }
+            return true;
+        });
+    }
+
     /// The neighbouring pages are shown by the view that has just been created, not by whichever
     /// one this code happens to be running in.
     if (view && view->canvasBase()
@@ -858,10 +1170,18 @@ bool PdfPageNavigator::showImage(KisImageSP image, KisNodeSP activeNode, int ind
         const QPointer<KisView> viewGuard = view;
         const QRect pageRect = layout.slots().at(layout.activeSlot()).rect;
 
-        QTimer::singleShot(400, this, [viewGuard, pageRect]() {
+        const QPointer<KisDocument> documentGuard = document;
+        QTimer::singleShot(400, this, [this, viewGuard, documentGuard, pageRect]() {
             if (!viewGuard || !viewGuard->canvasController() || !viewGuard->canvasBase()) {
                 return;
             }
+
+            /// Once per document. A turn inside a strip keeps the same document, and re-fitting it
+            /// moves the centre with the zoom: the page the follow reads then changes on its own.
+            if (m_zoomPlacedFor == documentGuard) {
+                return;
+            }
+            m_zoomPlacedFor = documentGuard;
 
             QWidget *widget = viewGuard->canvasBase()->canvasWidget();
             const QSize viewport = widget ? widget->size() : QSize();
@@ -892,6 +1212,15 @@ bool PdfPageNavigator::showImage(KisImageSP image, KisNodeSP activeNode, int ind
 
             viewGuard->canvasController()->setZoom(KoZoomMode::ZOOM_CONSTANT, zoom);
             viewGuard->canvasController()->setPreferredCenter(QPointF(pageRect.center()));
+
+            /// The view has just been placed by this code. Let the follow logic start from a clean
+            /// slate instead of from whatever the previous document left behind, or the page that
+            /// was just opened can be turned away again before it has settled -- which is what "it
+            /// does not stay where it was opened" looked like.
+            m_candidatePage = -1;
+            m_candidateSince = 0;
+            m_lastTurn = QDateTime::currentMSecsSinceEpoch();
+            m_viewSettleUntil = QDateTime::currentMSecsSinceEpoch() + 800;
         });
     }
 
@@ -905,9 +1234,11 @@ bool PdfPageNavigator::showImage(KisImageSP image, KisNodeSP activeNode, int ind
     m_index = index;
     m_stripPages.clear();
     m_stripRects.clear();
+    m_stripCells.clear();
     for (const PdfStripLayout::Slot &slot : layout.slots()) {
         m_stripPages.append(slot.page);
         m_stripRects.append(slot.rect);
+        m_stripCells.append(slot.cell);
     }
     m_stripActiveSlot = layout.isValid() ? layout.activeSlot() : -1;
 
@@ -977,25 +1308,122 @@ bool PdfPageNavigator::saveStripPages()
 
     say(QStringLiteral("saving %1 pages of the strip").arg(pages.size()));
 
-    std::function<void(int)> saveNext = [this, pages, saveNext](int at) mutable {
-        if (at >= pages.size()) {
-            say(QStringLiteral("saved %1 pages").arg(pages.size()));
-            return;
+    /// One after another, each waited for before the next starts.
+    ///
+    /// It used to chain them through sigSavingFinished -- a std::function that called itself from
+    /// inside the signal -- and that is where the application died with SIGSEGV: the call stack
+    /// grew through callbacks instead of through this loop (core 243431, while saving a notebook).
+    /// savePageAndWait() waits on a bounded event loop instead, the same one the close path uses,
+    /// and the follow timer is suspended for the duration so a page turn cannot run inside the save
+    /// that is cropping the layer it would move.
+    m_savingPages = true;
+    bool ok = true;
+    for (int page : pages) {
+        QString why;
+        if (!savePageAndWait(page, &why)) {
+            say(QStringLiteral("could not save page %1 (%2)").arg(page + 1).arg(why));
+            ok = false;
+            break;
         }
+    }
+    m_savingPages = false;
 
-        const int page = pages.at(at);
-        if (!savePage(page, [saveNext, at]() mutable { saveNext(at + 1); })) {
-            say(QStringLiteral("could not save page %1").arg(page + 1));
-        }
-    };
-
-    saveNext(0);
-    return true;
+    if (ok) {
+        say(QStringLiteral("saved %1 pages").arg(pages.size()));
+    }
+    return ok;
 }
 
 bool PdfPageNavigator::savePage(int index, std::function<void()> then)
 {
     return saveCurrentPage(nullptr, index, then);
+}
+
+void PdfPageNavigator::hookApplicationQuitOnce()
+{
+    if (m_quitHookInstalled || !QCoreApplication::instance()) {
+        return;
+    }
+    m_quitHookInstalled = true;
+
+    /// Quitting does not have to close the view first, so the same save is hung on the
+    /// application's own quit. It is a no-op when the view's close has already done it.
+    connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, [this]() {
+        prepareForClose();
+    });
+}
+
+bool PdfPageNavigator::prepareForClose()
+{
+    if (!m_document || !m_document->image() || m_index < 0) {
+        /// No page open: there is nothing here to lose.
+        return true;
+    }
+
+    if (!m_document->isModified()) {
+        /// The ink is already on disk, or there was never any. Either way Krita has nothing to ask
+        /// about, so there is no prompt to pre-empt.
+        return true;
+    }
+
+    QList<int> pages;
+    if (m_stripPages.isEmpty()) {
+        pages.append(m_index);
+    } else {
+        for (int page : m_stripPages) {
+            if (page >= 0) {
+                pages.append(page);
+            }
+        }
+    }
+
+    QString why;
+    for (int page : pages) {
+        if (!savePageAndWait(page, &why)) {
+            say(QStringLiteral("closing: page %1 could not be written (%2); the close goes back to Krita's own prompt")
+                    .arg(page + 1).arg(why));
+            return false;
+        }
+    }
+
+    /// Only now. The document stayed dirty until its ink was written, which is what kept the page
+    /// window's own rule -- a dirty page is never dropped -- honest while the write was in flight.
+    m_document->setModified(false);
+    say(QStringLiteral("closing: page %1 of %2 written through the notebook, nothing for Krita to ask about")
+            .arg(m_index + 1).arg(m_manifest.pages.size()));
+    return true;
+}
+
+bool PdfPageNavigator::savePageAndWait(int index, QString *why)
+{
+    QEventLoop wait;
+    bool finished = false;
+
+    const bool started = saveCurrentPage(why, index, [&wait, &finished]() {
+        finished = true;
+        wait.quit();
+    });
+
+    if (!started) {
+        return false;
+    }
+
+    if (!finished) {
+        /// The write is asynchronous: saveCurrentPage() returns when it has started, and this
+        /// waits for the notification the plugin already relies on. Bounded, and if the bound is
+        /// reached the caller must not close quietly.
+        QTimer::singleShot(CloseSaveTimeoutMs, &wait, &QEventLoop::quit);
+        wait.exec();
+    }
+
+    if (!finished) {
+        fail(why, QStringLiteral("page %1 was still being written after %2 ms")
+                      .arg(index + 1)
+                      .arg(CloseSaveTimeoutMs));
+        return false;
+    }
+
+    return true;
 }
 
 bool PdfPageNavigator::saveCurrentPage(QString *why, int index, std::function<void()> then)

@@ -208,6 +208,21 @@ void PdfIoPlugin::registerActions()
         }
     }
 
+    /// The strip switch. The strip existed behind PDFIO_PROBE_STRIP only, which nobody can set on
+    /// a tablet; a checkable action is both the way in and the indicator of which mode is in force.
+    KisAction *stripAction =
+        viewManager()->actionManager()->createAction(QStringLiteral("pdfio_strip_mode"));
+    if (stripAction) {
+        stripAction->setCheckable(true);
+        m_stripAction = stripAction;
+        connect(stripAction, &KisAction::toggled, this, &PdfIoPlugin::slotToggleStripMode);
+        if (menu) {
+            menu->addSeparator();
+            menu->addAction(stripAction);
+        }
+    }
+    updateStripAction();
+
     /// A switch rather than a plain action: turning pages by panning is the same gesture as
     /// looking at the bottom of a page, and whoever reads that way will want it off.
     KisAction *followAction =
@@ -223,6 +238,87 @@ void PdfIoPlugin::registerActions()
             menu->addAction(followAction);
         }
     }
+}
+
+void PdfIoPlugin::updateStripAction()
+{
+    if (!m_stripAction) {
+        return;
+    }
+
+    PdfPageNavigator *navigator = PdfPageNavigator::instance();
+    const bool strip = navigator->scope() > 1;
+
+    /// The check mark is the mode indicator, and the text says what is on without a menu open.
+    m_stripAction->setChecked(strip);
+    m_stripAction->setText(strip ? i18n("Five-page strip (active ±2) is on")
+                                 : i18n("Five-page strip (active ±2)"));
+    m_stripAction->setToolTip(strip
+        ? i18n("The page above and the page below are shown in the same document. "
+               "Choose again to go back to one page at a time.")
+        : i18n("Show the pages above and below the open one as well, in one document. "
+               "Choose again to go back to one page at a time."));
+}
+
+void PdfIoPlugin::rebuildForScope(int pageIndex, int attemptsLeft)
+{
+    PdfPageNavigator *navigator = PdfPageNavigator::instance();
+
+    /// The document that is open is still in the way while Krita is closing it. Its close is
+    /// deferred, so this waits rather than spinning: each attempt gives the event loop 700 ms.
+    if (navigator->currentDocument() && attemptsLeft > 0) {
+        if (KisDocument *document = navigator->currentDocument()) {
+            /// Its ink was written just before this was called; leaving it modified would make
+            /// Krita ask whether to save it while the close is already under way.
+            document->setModified(false);
+        }
+        if (KisView *view = navigator->currentView()) {
+            view->closeView();
+        }
+
+        QTimer::singleShot(700, this, [this, pageIndex, attemptsLeft]() {
+            rebuildForScope(pageIndex, attemptsLeft - 1);
+        });
+        return;
+    }
+
+    QString why;
+    if (!navigator->showPage(pageIndex, &why)) {
+        say(QStringLiteral("strip: cannot re-open page %1: %2").arg(pageIndex + 1).arg(why));
+        return;
+    }
+
+    say(QStringLiteral("strip: page %1 is open with %2 page(s) in the document, scope %3")
+            .arg(pageIndex + 1)
+            .arg(navigator->scope())
+            .arg(navigator->scope()));
+}
+
+void PdfIoPlugin::slotToggleStripMode()
+{
+    PdfPageNavigator *navigator = PdfPageNavigator::instance();
+    /// Five, so the active page has two pages on each side of it. The window rolls -- repainting
+    /// only the slots that leave -- when the active page reaches that edge.
+    const int wanted = (m_stripAction && m_stripAction->isChecked()) ? 5 : 1;
+
+    navigator->setScope(wanted);
+    updateStripAction();
+
+    if (!navigator->hasNotebook()) {
+        say(QStringLiteral("strip: mode set to %1 page(s); it applies when a notebook is opened")
+                .arg(wanted));
+        return;
+    }
+
+    /// What is on screen is written before the document that holds it is torn down.
+    navigator->saveStripPages();
+
+    const int page = navigator->currentIndex();
+    say(QStringLiteral("strip: switching to %1, keeping page %2 open")
+            .arg(wanted > 1 ? QStringLiteral("a five-page strip") : QStringLiteral("one page"))
+            .arg(page + 1));
+
+    QTimer::singleShot(0, this, [this, page]() { rebuildForScope(page, 6); });
 }
 
 void PdfIoPlugin::slotOpenNotebook()

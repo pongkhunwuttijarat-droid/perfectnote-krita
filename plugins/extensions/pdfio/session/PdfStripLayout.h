@@ -10,6 +10,7 @@
 #include "session/PdfSessionManifest.h"
 
 #include <QList>
+#include <QPointF>
 #include <QRect>
 #include <QSize>
 
@@ -64,6 +65,28 @@ public:
 
     /// Which page a point of the strip image falls on, or -1 for a gap or an empty slot.
     int pageAt(const QPoint &point) const;
+
+    /**
+     * Which page is nearest to \a point, or -1 when the nearest one is further than
+     * \a maxDistance.
+     *
+     * pageAt() is exact, which is right for "what is under the cursor" and wrong for "what is the
+     * view resting on": the centre of the viewport spends real time in the gap between two pages,
+     * and pageAt() answers -1 for all of it. A caller that arms a settle timer on that answer never
+     * sees the page change, however long the view sits still -- the two-slot-wide answer is stable
+     * instead: it is a function of the point alone, and every point of the gap belongs to the page
+     * it is nearer to.
+     *
+     * \a pages and \a rects are parallel lists, the same shape PdfPageNavigator keeps as
+     * m_stripPages and m_stripRects; a page of -1 is skipped. Ties inside the gap resolve to the
+     * first slot in order, so the answer never depends on the order the pages were visited in --
+     * a value that flickers between two pages resets a settle timer just as badly as one that is
+     * always -1.
+     */
+    static int nearestPage(const QList<int> &pages, const QList<QRect> &rects,
+                           const QPointF &point, qreal maxDistance,
+                           int preferredPage = -1, qreal hysteresis = 0.0);
+
 
 private:
     QList<Slot> m_slots;

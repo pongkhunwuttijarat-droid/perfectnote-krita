@@ -289,4 +289,78 @@ if (Poppler_Qt${QT_MAJOR_VERSION}_FOUND)
     set_tests_properties(pdfio-PdfNotebookBundleTest PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+    # The scroll-follow bug, as a state machine over real strip geometry. checkScrollFollow() is a
+    # private member of a KisPart singleton, so the test drives a line-referenced replica of it
+    # against PdfStripLayout, which is where the fix's primitive lives -- see
+    # PdfStripLayout::nearestPage and docs/verify/MULTIPAGE-RENDER-TEST.md.
+    add_executable(PdfStripScrollFollowTest
+        PdfStripScrollFollowTest.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../session/PdfStripLayout.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../session/PdfSessionManifest.cpp
+        )
+
+    target_include_directories(PdfStripScrollFollowTest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+    target_link_libraries(PdfStripScrollFollowTest PRIVATE
+        Qt${QT_MAJOR_VERSION}::Core
+        Qt${QT_MAJOR_VERSION}::Gui
+        Qt${QT_MAJOR_VERSION}::Test)
+
+    set_target_properties(PdfStripScrollFollowTest PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+    add_test(NAME pdfio-PdfStripScrollFollowTest COMMAND PdfStripScrollFollowTest)
+    set_tests_properties(pdfio-PdfStripScrollFollowTest PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+    # The three-slot strip over real documents: rendering into every slot, cursor to page, node
+    # activation on a real view, locking as the guarantee, and what a page folder with several
+    # layers does across a save and a reload. It needs KisPart, a main window and a view for the
+    # activation half, so it copies the harness PdfNavigatorIntegrationTest established.
+    add_executable(PdfStripCursorTest
+        PdfStripCursorTest.cpp
+        "${CMAKE_BINARY_DIR}/krita/krita.qrc"
+        ${CMAKE_CURRENT_SOURCE_DIR}/../backend/PdfRenderBackendCreate.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../backends/poppler/PopplerRenderBackend.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../session/PdfInkLoader.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../session/PdfPageSaver.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../session/PdfSessionManifest.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../session/PdfStripBuilder.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../session/PdfStripLayout.cpp
+        )
+
+    add_dependencies(PdfStripCursorTest
+        kritakraexport
+        kritalcmsengine)
+
+    target_include_directories(PdfStripCursorTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+        ${CMAKE_SOURCE_DIR}/plugins/impex/libkra)
+
+    target_link_libraries(PdfStripCursorTest PRIVATE
+        Qt${QT_MAJOR_VERSION}::Core
+        Qt${QT_MAJOR_VERSION}::Gui
+        Qt${QT_MAJOR_VERSION}::Widgets
+        Qt${QT_MAJOR_VERSION}::Test
+        Poppler::Qt${QT_MAJOR_VERSION}
+        kritaui
+        kritaimage
+        kritawidgetutils
+        kritalibkra
+        KF${KF_MAJOR}::Archive)
+
+    target_compile_definitions(PdfStripCursorTest PRIVATE
+        PDFIO_HAVE_POPPLER
+        FILES_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/"
+        PDFIO_PLUGIN_DIR="$<TARGET_FILE_DIR:kritakraexport>")
+
+    set_target_properties(PdfStripCursorTest PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+        AUTORCC ON)
+
+    add_test(NAME pdfio-PdfStripCursorTest COMMAND PdfStripCursorTest)
+    set_tests_properties(pdfio-PdfStripCursorTest PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QTEST_FUNCTION_TIMEOUT=120000"
+        TIMEOUT 600)
+
 endif()

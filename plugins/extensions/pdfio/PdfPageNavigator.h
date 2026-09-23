@@ -65,6 +65,20 @@ public:
      */
     bool saveStripPages();
 
+    /**
+     * Writes what the open page -- every page the window holds -- still has unsaved, so that
+     * closing a tab or quitting Krita cannot lose ink.
+     *
+     * Returns true when the document is safe to close: either it had nothing unsaved, or every
+     * page's ink reached its artifact. Returns false when a write could not be completed, and the
+     * caller must then NOT close silently -- Krita's own "do you want to save it?" prompt is what
+     * should run, so the user is told rather than the ink dropped.
+     *
+     * Hung off the view (see showImage()) and off the application's aboutToQuit, so both closing
+     * our tab and quitting reach it before Krita would ask about the document.
+     */
+    bool prepareForClose();
+
     /// The view showing it, for code that needs the canvas rather than the document.
     KisView *currentView() const;
 
@@ -136,10 +150,21 @@ private:
     /// is called once the save has finished, which is how the pages are chained.
     bool savePage(int index, std::function<void()> then = nullptr);
 
+    /// Saves one page and waits, bounded, for the file to have been written: saveCurrentPage()
+    /// returns when the write has started, and a close cannot go on before it has landed.
+    bool savePageAndWait(int index, QString *why);
+
+    /// Hangs prepareForClose() on the application's own quit, once.
+    void hookApplicationQuitOnce();
+
     static QString projectRoot();
 
     /// Acts on where the middle of the view has settled.
     void checkScrollFollow();
+
+    /// Which slot of the open window the given document point is over, or -1. Window-local: it
+    /// reads m_stripCells and nothing about the notebook.
+    int windowSlotFor(const QPointF &point) const;
 
     /**
      * Which page the given document point falls on: the open one, a neighbour above or below it,
@@ -155,7 +180,54 @@ private:
     int m_index = -1;
 
     bool m_scrollFollow = true;
+
+    /// True while a page turn was started by the view following its centre instead of by the user
+    /// asking for the next page. Such a turn must NOT move the view: the canvas is already where
+    /// the user put it, and centring it again drags the centre back over the boundary it has just
+    /// crossed -- which is exactly what "the active page does not change" looked like.
+    bool m_turnFromScroll = false;
+
+    /// Nothing is decided about the centre before this moment. The view is zoomed and centred by
+    /// this code when a page opens; a tick that lands inside that has been seen to report a zoom of
+    /// 47 while the canvas was at 0.14, and a centre at the document origin.
+    qint64 m_viewSettleUntil = 0;
+
+    /// When the last dropped reading was written out, so a canvas that never settles cannot flood.
+    qint64 m_lastRejectLog = 0;
+
+    /// When the follow last said anything at all. The switch being off and the follow running
+    /// without ever deciding anything used to look exactly the same in the log -- an empty one --
+    /// and telling them apart cost an afternoon.
+    qint64 m_lastFollowLog = 0;
+
+    /// True while a roll of the strip window is in progress. rollToPage() calls back into
+    /// activateWithinStrip(), which is the very place that decides to roll -- without this the two
+    /// called each other and the window rolled once a second, repainting every slot it held.
+    bool m_rollingWindow = false;
+
+    /// When the window last rolled, so a page sitting on the edge cannot roll it on every tick.
+    qint64 m_lastWindowRoll = 0;
+
+    /// True while several pages are being written one after another. The write waits on a nested
+    /// event loop, and the follow timer keeps firing inside it: without this a page turn could run
+    /// in the middle of the save that is cropping the very layer it would move.
+    bool m_savingPages = false;
+
+    /// The document the fit zoom has already been applied to. Fitting again on every page turn is
+    /// what made the page under the centre jump around: the zoom changed, the centre moved with it,
+    /// and the page the follow computed changed twice in 600 ms (0.25 <-> 0.667 in the log).
+    QPointer<KisDocument> m_zoomPlacedFor;
+
+    /// The view's own page system: which slot of the window the middle of the viewport is over.
+    /// Window-local geometry (0..slots-1) that knows nothing about notebook page numbers. The two
+    /// systems meet in one place -- windowSlotFor() and the single m_stripPages.at(slot) that turns
+    /// a slot into a page -- and after a roll this is reset from the active page, so a changed
+    /// mapping can never be mistaken for the user having moved.
+    int m_windowSlot = -1;
     QTimer *m_scrollWatch = nullptr;
+
+    /// Whether prepareForClose() has been hung off the application's quit already.
+    bool m_quitHookInstalled = false;
 
     /// How many pages the open document holds at full resolution, and at what resolution.
     ///
@@ -200,6 +272,11 @@ private:
     QList<int> m_stripPages;
     QList<QRect> m_stripRects;
 
+    /// The band each slot owns, in slot order. The cells tile the strip; the page rectangles inside
+    /// them do not when the pages are of different sizes, and it is the band that decides which page
+    /// the centre of the viewport is over.
+    QList<QRect> m_stripCells;
+
     /// The paper layer of each slot, in slot order, for repainting one of them.
     QList<KisNodeSP> m_stripPaper;
     int m_stripActiveSlot = -1;
@@ -224,7 +301,11 @@ private:
      * a page that is not in the strip only means repainting the slots whose page changed. That is
      * what makes a run of page turns continuous instead of a rebuild every other turn.
      */
-    bool rollToPage(int index, QString *why);
+    /// a centreOn says which page the new window is centred on; the page that becomes active is
+    /// a index either way. Rolling down leaves the active page one slot in from the top rather
+    /// than in the middle, so the page just left stays visible above it and the follow does not
+    /// turn straight back to it. -1 centres on a index.
+    bool rollToPage(int index, QString *why, int centreOn = -1);
     bool activateWithinStrip(int index, QString *why);
 
     /// Creates the document, its view and the strip decoration, and gives the page that was open

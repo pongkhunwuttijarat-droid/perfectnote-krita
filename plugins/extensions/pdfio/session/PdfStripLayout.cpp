@@ -8,11 +8,13 @@
 
 #include <QtMath>
 
+#include <limits>
+
 namespace {
 
 /// The blank space between two slots, in image pixels. Part of the cell, so it does not change the
 /// image size when the window rolls.
-constexpr int SlotGap = 48;
+constexpr int SlotGap = 112;
 
 QSize pageSizeInPixels(const PdfSessionManifest &manifest, const PdfPageRecord &page, qreal dpi)
 {
@@ -142,4 +144,52 @@ int PdfStripLayout::pageAt(const QPoint &point) const
         }
     }
     return -1;
+}
+
+int PdfStripLayout::nearestPage(const QList<int> &pages, const QList<QRect> &rects,
+                                const QPointF &point, qreal maxDistance,
+                                int preferredPage, qreal hysteresis)
+{
+    int best = -1;
+    qreal bestDistance = maxDistance;
+    qreal preferredDistance = std::numeric_limits<qreal>::max();
+
+    for (int slot = 0; slot < pages.size() && slot < rects.size(); ++slot) {
+        if (pages.at(slot) < 0) {
+            continue;
+        }
+
+        const QRectF rect(rects.at(slot));
+        if (!rect.isValid()) {
+            continue;
+        }
+
+        /// Distance from the point to the rectangle, zero inside it. A point beside the strip is
+        /// measured to the corner, which is what makes the answer continuous as the centre moves.
+        const qreal dx = qMax(qMax(rect.left() - point.x(), qreal(0)), point.x() - rect.right());
+        const qreal dy = qMax(qMax(rect.top() - point.y(), qreal(0)), point.y() - rect.bottom());
+        const qreal distance = qSqrt(dx * dx + dy * dy);
+
+        if (pages.at(slot) == preferredPage) {
+            preferredDistance = distance;
+        }
+
+        /// Strictly nearer, so the first slot keeps a tie: the answer must be a function of the
+        /// point alone, not of the order the pages happen to be visited in.
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            best = pages.at(slot);
+        }
+    }
+
+    /// Hysteresis: while the page that is already open is within \a hysteresis of the nearest one,
+    /// it keeps the answer. Without it a centre resting exactly on the line where the two pages
+    /// are equally near flips from tick to tick as the scroll position rounds, and a value that
+    /// flips resets a settle timer as effectively as being -1 does.
+    if (preferredPage >= 0 && preferredDistance < std::numeric_limits<qreal>::max()
+        && preferredDistance <= bestDistance + hysteresis) {
+        return preferredPage;
+    }
+
+    return best;
 }

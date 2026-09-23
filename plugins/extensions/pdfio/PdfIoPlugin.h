@@ -7,9 +7,12 @@
 #ifndef PDFIOPLUGIN_H
 #define PDFIOPLUGIN_H
 
+#include <QPointer>
 #include <QString>
 
 #include <KisActionPlugin.h>
+
+class QAction;
 
 /**
  * Entry point of the pdfio extension: PDF pages as locked backgrounds with an ink group on
@@ -50,8 +53,34 @@ private Q_SLOTS:
     /// before this, which is exactly why a notebook could not leave the device it was made on.
     void slotOpenNotebookBundle();
 
+    /**
+     * Switches between one page at a time (design A) and a strip of three (design B), and re-lays
+     * out the page that is open so the change is visible immediately rather than on the next open.
+     *
+     * The strip was reachable only through the PDFIO_PROBE_STRIP environment variable, which the
+     * user cannot set on a tablet; this is the action that makes it testable by hand.
+     */
+    void slotToggleStripMode();
+
 private:
     void registerActions();
+
+    /// Puts the checked state of the strip action back in step with the navigator's scope, which is
+    /// the mode that is actually in force.
+    void updateStripAction();
+
+    /**
+     * Rebuilds the open page at the scope that is now set.
+     *
+     * PdfPageNavigator::showPage() deliberately does no work when the page asked for is already in
+     * the open strip -- that is what makes turning to a neighbouring page free -- so a scope change
+     * cannot take effect while the old strip document is alive. The document is closed first and
+     * this waits for that close, which Krita defers, then opens the page again.
+     */
+    void rebuildForScope(int pageIndex, int attemptsLeft);
+
+    /// The strip switch, kept so its checked state can show which mode is in force.
+    QPointer<QAction> m_stripAction;
 
     /**
      * Unpacks \a bundlePath under the project root and opens it as the current notebook.

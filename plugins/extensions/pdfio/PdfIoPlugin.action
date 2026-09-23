@@ -42,6 +42,19 @@
        <statusTip></statusTip>
      </Action>
 
+     <Action name="pdfio_strip_mode">
+       <icon></icon>
+       <text>Five-page strip (active ±2)</text>
+       <whatsThis></whatsThis>
+       <toolTip></toolTip>
+       <iconText></iconText>
+       <activationFlags>10000</activationFlags>
+       <activationConditions>0</activationConditions>
+       <shortcut></shortcut>
+       <isCheckable>true</isCheckable>
+       <statusTip></statusTip>
+     </Action>
+
      <Action name="pdfio_follow_scrolling">
        <icon></icon>
        <text>Turn pages by panning</text>
