@@ -10,6 +10,8 @@
 
 #include <QWidget>
 
+#include <functional>
+
 #include <KoColorSpace.h>
 #include <KoColorProfile.h>
 
@@ -117,6 +119,20 @@ public:
     QList<QAction*> createChangeUnitActions(bool addPixelUnit = false);
 
     void closeView();
+
+    /**
+     * A chance for the document to make itself safe before Krita asks the user whether to save it.
+     *
+     * Called from queryClose() before the "the document has been modified" prompt. A handler that
+     * returns true says the document is ready to go -- it is not modified any more and there is
+     * nothing to ask about. A handler that returns false is deliberately not trusted: the normal
+     * prompt runs, so a document that could not write itself still leaves the user the choice.
+     *
+     * This is how a notebook page closes. Its ink is written by the navigator's own page save, so
+     * Krita is never offered the chance to write the editing document -- the rendered page
+     * included -- as a .kra, and the ink is never dropped for want of a prompt.
+     */
+    void setPreCloseHandler(std::function<bool()> handler);
 
     /**
      * Returns the current screen that the view belongs to

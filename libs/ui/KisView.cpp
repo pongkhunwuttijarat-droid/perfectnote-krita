@@ -136,6 +136,9 @@ public:
     KisSignalCompressor floatingMessageCompressor;
     QMdiSubWindow *subWindow {nullptr};
 
+    /// See KisView::setPreCloseHandler().
+    std::function<bool()> preCloseHandler;
+
     bool softProofing {false};
     bool gamutCheck {false};
 
@@ -1159,6 +1162,14 @@ bool KisView::queryClose()
 
     document()->waitForSavingToComplete();
 
+    /// The document gets the first word. One that has brought itself to a safe state -- a notebook
+    /// page, whose ink has just been written by the navigator's own page save -- is not asked
+    /// about, so there is no prompt and no chance for Krita to write the editing document as a
+    /// .kra. A handler that could not do it falls through to the prompt below.
+    if (d->preCloseHandler && d->preCloseHandler()) {
+        return true;
+    }
+
     if (document()->isModified()) {
         QString name;
         name = QFileInfo(document()->path()).fileName();
@@ -1437,6 +1448,11 @@ void KisView::slotImageSizeChanged(const QPointF &oldStillPoint, const QPointF &
 void KisView::closeView()
 {
     d->subWindow->close();
+}
+
+void KisView::setPreCloseHandler(std::function<bool()> handler)
+{
+    d->preCloseHandler = std::move(handler);
 }
 
 bool KisView::shouldAcceptDrag(const QDropEvent *event) const
