@@ -42,8 +42,28 @@ private Q_SLOTS:
     void slotExportPdf();
     void slotSaveNotebook();
 
+    /// Writes the whole notebook -- every page's ink and the source it was made from -- as one
+    /// file the user can carry to another device.
+    void slotSaveNotebookAsBundle();
+
+    /// Opens a notebook that arrived as one file. There was no inverse of "Open PDF as notebook"
+    /// before this, which is exactly why a notebook could not leave the device it was made on.
+    void slotOpenNotebookBundle();
+
 private:
     void registerActions();
+
+    /**
+     * Unpacks \a bundlePath under the project root and opens it as the current notebook.
+     *
+     * \a replaceWithoutAsking is for Android, where the system picker is the only dialog there is;
+     * on the desktop a notebook that is already there is a question for the user, because two
+     * notebooks for the same source means choosing between them.
+     */
+    void openBundleFile(const QString &bundlePath, bool replaceWithoutAsking);
+
+    /// The name to offer in the save dialog: <source>.pnb, or notebook.pnb with nothing open.
+    QString bundleSuggestion() const;
 
     /// Temporary measurement: opens N pages in a row and reports resident memory and the
     /// number of live documents after each, so the scaling with page count is visible rather

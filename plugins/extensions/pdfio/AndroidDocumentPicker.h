@@ -29,8 +29,8 @@ public:
     ~AndroidDocumentPicker() override;
 
     /**
-     * Opens the system picker. \a onPicked is called with the local copy, or with an empty string
-     * and a reason when the user cancels or the copy fails.
+     * Opens the system picker for a PDF. \a onPicked is called with the local copy, or with an
+     * empty string and a reason when the user cancels or the copy fails.
      */
     void pickPdf(std::function<void(const QString &localPath, const QString &why)> onPicked);
 
@@ -41,6 +41,29 @@ public:
     void createPdf(const QString &suggestedName,
                    const QString &localFile,
                    std::function<void(bool, const QString &)> onWritten);
+
+    /// The same two things for a notebook bundle. A .pnb is a zip, which is the whole difference:
+    /// the picker is told application/zip rather than application/pdf, and SAF copies the chosen
+    /// content out and back exactly as it does for a PDF.
+    void pickBundle(std::function<void(const QString &localPath, const QString &why)> onPicked);
+    void createBundle(const QString &suggestedName,
+                      const QString &localFile,
+                      std::function<void(bool, const QString &)> onWritten);
+
+    /**
+     * The general pair the two above are.
+     *
+     * \a mimeType is what the system picker filters on and what a created document is declared as.
+     * \a cacheFileName is the name the chosen content is copied to while it is worked on locally:
+     * both PdfRenderer and KArchive need a real file, and a content URI is only a stream.
+     */
+    void pickFile(const QString &mimeType,
+                  const QString &cacheFileName,
+                  std::function<void(const QString &localPath, const QString &why)> onPicked);
+    void createFile(const QString &mimeType,
+                    const QString &suggestedName,
+                    const QString &localFile,
+                    std::function<void(bool, const QString &)> onWritten);
 
 private:
     struct Private;

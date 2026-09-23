@@ -20,7 +20,9 @@
 #include <QFileInfo>
 #include <QMenu>
 #include <QMenuBar>
+#include <QMessageBox>
 #include <QScrollBar>
+#include <QStandardPaths>
 #include <QTimer>
 
 /// Not behind PDFIO_HAVE_POPPLER: the session, the saver, the ink loader and the exporter are all
@@ -28,6 +30,7 @@
 /// PdfRenderBackend::create.
 #include "session/PdfExporter.h"
 #include "session/PdfInkLoader.h"
+#include "session/PdfNotebookBundle.h"
 #include "session/PdfPageSaver.h"
 #include "session/PdfProjectBuilder.h"
 #include "session/PdfStripBuilder.h"
@@ -173,11 +176,13 @@ void PdfIoPlugin::registerActions()
 
     const Entry entries[] = {
         { "pdfio_open_notebook", &PdfIoPlugin::slotOpenNotebook },
+        { "pdfio_open_bundle", &PdfIoPlugin::slotOpenNotebookBundle },
         { "pdfio_save_page", &PdfIoPlugin::slotSavePage },
         { "pdfio_next_page", &PdfIoPlugin::slotNextPage },
         { "pdfio_previous_page", &PdfIoPlugin::slotPreviousPage },
         { "pdfio_export_pdf", &PdfIoPlugin::slotExportPdf },
         { "pdfio_save_notebook", &PdfIoPlugin::slotSaveNotebook },
+        { "pdfio_save_bundle", &PdfIoPlugin::slotSaveNotebookAsBundle },
     };
 
     KisMainWindow *window = viewManager()->mainWindow();
@@ -285,6 +290,196 @@ void PdfIoPlugin::slotSaveNotebook()
     if (!PdfPageNavigator::instance()->saveStripPages()) {
         qWarning() << "pdfio: could not save the notebook";
     }
+}
+
+QString PdfIoPlugin::bundleSuggestion() const
+{
+    PdfPageNavigator *navigator = PdfPageNavigator::instance();
+    const QString base = navigator->hasNotebook()
+        ? QFileInfo(navigator->manifest().sourceFile).completeBaseName()
+        : QStringLiteral("notebook");
+    return base + QLatin1Char('.') + PdfNotebookBundle::extension();
+}
+
+void PdfIoPlugin::slotSaveNotebookAsBundle()
+{
+    PdfPageNavigator *navigator = PdfPageNavigator::instance();
+    if (!navigator->hasNotebook()) {
+        say(QStringLiteral("save as one file: no notebook is open"));
+        return;
+    }
+
+    /// The ink that is on screen lives in the document until a save writes it out, so the notebook
+    /// is written first. Krita saves in the background and the navigator hands out no completion
+    /// callback, so on the desktop the file dialog -- which takes the user a moment -- is what lets
+    /// that save finish, and on Android a short timer is. A stroke made in the last instant before
+    /// this action can therefore still miss the bundle; docs/verify/BUNDLE-CORE.md says so plainly
+    /// rather than pretending the chain is airtight.
+    navigator->saveStripPages();
+
+    const QString suggested = bundleSuggestion();
+
+#if defined(Q_OS_ANDROID)
+    /// Android has no useful file dialog: the bundle is written to a temporary file and handed to
+    /// the system's document creator, which is where the user picks the real destination -- the
+    /// same route the PDF export takes.
+    const QString staged = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
+                               .filePath(QStringLiteral("pdfio-notebook.pnb"));
+
+    QTimer::singleShot(600, this, [this, navigator, staged, suggested]() {
+        QString why;
+        if (!PdfNotebookBundle::save(navigator->projectDir(), staged, &why)) {
+            say(QStringLiteral("the notebook could not be written as one file: %1").arg(why));
+            return;
+        }
+        say(QStringLiteral("staged %1 (%2 bytes)").arg(staged).arg(QFileInfo(staged).size()));
+
+        auto *writer = new AndroidDocumentPicker(this);
+        writer->createBundle(suggested, staged, [this, writer](bool written, const QString &why) {
+            writer->deleteLater();
+            if (!written) {
+                say(QStringLiteral("the notebook was not saved: %1").arg(why));
+                return;
+            }
+            say(QStringLiteral("the notebook was saved to the location that was chosen"));
+        });
+    });
+#else
+    const QString target = QFileDialog::getSaveFileName(nullptr,
+                                                        i18n("Save the notebook as one file"),
+                                                        suggested,
+                                                        PdfNotebookBundle::fileFilter());
+    if (target.isEmpty()) {
+        return;
+    }
+
+    /// The dialog's own filter is a convenience, not a rule, so the suffix is added when the user
+    /// typed a name without one: every file manager then knows what the file is.
+    QString destination = target;
+    if (!destination.endsWith(QLatin1Char('.') + PdfNotebookBundle::extension(), Qt::CaseInsensitive)) {
+        destination += QLatin1Char('.') + PdfNotebookBundle::extension();
+    }
+
+    QString why;
+    if (!PdfNotebookBundle::save(navigator->projectDir(), destination, &why)) {
+        say(QStringLiteral("the notebook could not be written as one file: %1").arg(why));
+        return;
+    }
+    say(QStringLiteral("saved the notebook as %1 (%2 bytes)")
+            .arg(destination).arg(QFileInfo(destination).size()));
+#endif
+}
+
+void PdfIoPlugin::slotOpenNotebookBundle()
+{
+#if defined(Q_OS_ANDROID)
+    /// The same route as opening a PDF: QFileDialog is not usable, the file arrives as a content
+    /// URI, and it has to be copied somewhere the archive can be read from.
+    auto *picker = new AndroidDocumentPicker(this);
+    say(QStringLiteral("the notebook picker is opening"));
+    picker->pickBundle([this, picker](const QString &localPath, const QString &why) {
+        picker->deleteLater();
+        say(QStringLiteral("notebook picker finished: path \"%1\" reason \"%2\"").arg(localPath, why));
+        if (localPath.isEmpty()) {
+            say(QStringLiteral("nothing was opened: %1").arg(why));
+            return;
+        }
+
+        /// Deferred out of the activity result callback, for the reason the PDF open is: opening a
+        /// document builds a view and walks the resource system, and doing that while the activity
+        /// transition unwinds crashed inside Qt's own hash tables.
+        QTimer::singleShot(0, this, [this, localPath]() { openBundleFile(localPath, true); });
+    });
+#else
+    const QString path = QFileDialog::getOpenFileName(nullptr,
+                                                      i18n("Open a notebook file"),
+                                                      QString(),
+                                                      PdfNotebookBundle::fileFilter());
+    if (path.isEmpty()) {
+        return;
+    }
+    openBundleFile(path, false);
+#endif
+}
+
+void PdfIoPlugin::openBundleFile(const QString &bundlePath, bool replaceWithoutAsking)
+{
+    /// Read before writing: inspect() makes every check extract() makes and touches nothing, so a
+    /// file that is not a notebook is refused before a directory is created for it.
+    QString why;
+    const PdfNotebookBundle::Info info = PdfNotebookBundle::inspect(bundlePath, &why);
+    if (!info.isValid()) {
+        say(QStringLiteral("this file is not a notebook: %1").arg(why));
+        return;
+    }
+
+    say(QStringLiteral("bundle: %1 pages, %2 files, %3 withheld, %4 bytes%5")
+            .arg(info.manifest.pages.size())
+            .arg(info.entries.size())
+            .arg(info.withheld.size())
+            .arg(info.bundleBytes)
+            .arg(info.unknown.isEmpty()
+                     ? QString()
+                     : QStringLiteral(", ignoring %1 entries that are not part of a notebook")
+                           .arg(info.unknown.size())));
+
+    const QString root = PdfNotebookBundle::defaultProjectRoot();
+    if (!QDir().mkpath(root)) {
+        say(QStringLiteral("cannot create %1").arg(root));
+        return;
+    }
+
+    /// The name the navigator gives this notebook -- source base name and source hash -- so that
+    /// opening the source below finds the project that was just unpacked instead of making a
+    /// second, empty one beside it.
+    const QString destination = QDir(root).filePath(PdfNotebookBundle::extractDirName(info.manifest));
+
+    bool replace = replaceWithoutAsking;
+    if (!replace && QFileInfo::exists(destination)) {
+        const auto answer = QMessageBox::question(
+            nullptr,
+            i18n("A notebook for this source is already here"),
+            i18n("This device already has a notebook for %1. Replace it with the one in the file?",
+                 info.manifest.sourceFile));
+        if (answer != QMessageBox::Yes) {
+            say(QStringLiteral("the notebook already on the device was left alone"));
+            return;
+        }
+        replace = true;
+    }
+
+    PdfNotebookBundle::ExtractOptions options;
+    options.replaceExisting = replace;
+
+    QStringList ignored;
+    why.clear();
+    if (!PdfNotebookBundle::extract(bundlePath, destination, options, &why, &ignored)) {
+        say(QStringLiteral("the notebook could not be unpacked: %1").arg(why));
+        return;
+    }
+    say(QStringLiteral("unpacked the notebook to %1").arg(destination));
+
+    /// Deferred, for the same reason the PDF open is, and on Android also to get out of the
+    /// activity result callback.
+    QTimer::singleShot(0, this, [this, destination, info]() {
+        const QString source = QDir(destination).filePath(info.manifest.sourceFile);
+        QString why;
+        if (!PdfPageNavigator::instance()->openNotebook(source, &why)) {
+            say(QStringLiteral("the unpacked notebook could not be opened: %1").arg(why));
+            return;
+        }
+
+        /// Opening goes through the navigator, which keys a project by the source's own hash. It
+        /// finds the directory just written only while its root is the one assumed here, so a drift
+        /// between the two is said out loud instead of leaving an empty notebook and no reason.
+        if (QFileInfo(PdfPageNavigator::instance()->projectDir()).absoluteFilePath()
+            != QFileInfo(destination).absoluteFilePath()) {
+            say(QStringLiteral("WARNING: the notebook opened from %1, not from %2: the project root "
+                               "assumed by PdfNotebookBundle::defaultProjectRoot() no longer matches "
+                               "the navigator's, and the ink that came in the file was not used")
+                    .arg(PdfPageNavigator::instance()->projectDir(), destination));
+        }
+    });
 }
 
 void PdfIoPlugin::slotExportPdf()

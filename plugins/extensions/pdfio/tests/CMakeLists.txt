@@ -254,4 +254,39 @@ if (Poppler_Qt${QT_MAJOR_VERSION}_FOUND)
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QTEST_FUNCTION_TIMEOUT=120000"
         TIMEOUT 600)
 
+    # The bundle is a zip of a project directory: one file in, one file out. Reading one is the
+    # dangerous half -- zip slip, an unknown schema, a source that does not hash to what the
+    # manifest recorded, a manifest naming a page the file does not carry, a truncated or edited
+    # archive -- and all of it is pure logic over an archive, so it belongs in ctest rather than
+    # only inside a running Krita. The archive is the same KArchive the plugin already reads a .kra
+    # with, which is why the whole feature costs no new dependency.
+
+    add_executable(PdfNotebookBundleTest
+        PdfNotebookBundleTest.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../backends/poppler/PopplerRenderBackend.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../session/PdfNotebookBundle.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../session/PdfSession.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../session/PdfSessionManifest.cpp
+        )
+
+    target_include_directories(PdfNotebookBundleTest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+    target_link_libraries(PdfNotebookBundleTest PRIVATE
+        Qt${QT_MAJOR_VERSION}::Core
+        Qt${QT_MAJOR_VERSION}::Gui
+        Qt${QT_MAJOR_VERSION}::Test
+        Poppler::Qt${QT_MAJOR_VERSION}
+        KF${KF_MAJOR}::Archive)
+
+    target_compile_definitions(PdfNotebookBundleTest PRIVATE
+        PDFIO_HAVE_POPPLER
+        FILES_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/")
+
+    set_target_properties(PdfNotebookBundleTest PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+    add_test(NAME pdfio-PdfNotebookBundleTest COMMAND PdfNotebookBundleTest)
+    set_tests_properties(pdfio-PdfNotebookBundleTest PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 endif()

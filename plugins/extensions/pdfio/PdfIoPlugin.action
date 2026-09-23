@@ -16,6 +16,19 @@
        <statusTip></statusTip>
      </Action>
 
+     <Action name="pdfio_open_bundle">
+       <icon></icon>
+       <text>Open a notebook file</text>
+       <whatsThis></whatsThis>
+       <toolTip></toolTip>
+       <iconText></iconText>
+       <activationFlags>10000</activationFlags>
+       <activationConditions>0</activationConditions>
+       <shortcut></shortcut>
+       <isCheckable>false</isCheckable>
+       <statusTip></statusTip>
+     </Action>
+
      <Action name="pdfio_save_page">
        <icon></icon>
        <text>Save the page notes</text>
@@ -45,6 +58,19 @@
      <Action name="pdfio_save_notebook">
        <icon></icon>
        <text>Save the notebook</text>
+       <whatsThis></whatsThis>
+       <toolTip></toolTip>
+       <iconText></iconText>
+       <activationFlags>10000</activationFlags>
+       <activationConditions>0</activationConditions>
+       <shortcut></shortcut>
+       <isCheckable>false</isCheckable>
+       <statusTip></statusTip>
+     </Action>
+
+     <Action name="pdfio_save_bundle">
+       <icon></icon>
+       <text>Save the notebook as one file</text>
        <whatsThis></whatsThis>
        <toolTip></toolTip>
        <iconText></iconText>

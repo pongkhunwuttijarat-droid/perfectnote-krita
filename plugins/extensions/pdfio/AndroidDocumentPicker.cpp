@@ -43,7 +43,7 @@ void reportJniException(const char *where)
 }
 
 /// Copies what a content:// URI offers into a real file, and returns that path.
-QString copyContentToCache(const QString &uri)
+QString copyContentToCache(const QString &uri, const QString &cacheFileName)
 {
     QJniObject activity = QJniObject::callStaticObjectMethod("org/qtproject/qt5/android/QtNative",
                                                              "activity",
@@ -71,8 +71,7 @@ QString copyContentToCache(const QString &uri)
     }
 
     const QString target =
-        QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
-            .filePath(QStringLiteral("pdfio-picked.pdf"));
+        QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation)).filePath(cacheFileName);
     QFile file(target);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         stream.callMethod<void>("close", "()V");
@@ -181,6 +180,10 @@ struct AndroidDocumentPicker::Private
     std::function<void(bool, const QString &)> written;
     QString pendingLocalFile;
 
+    /// What the picked content is copied to while it is worked on. Set by pickFile() before the
+    /// activity starts, because the result callback only ever sees the URI.
+    QString pendingCacheName;
+
     void handleActivityResult(int receiverRequestCode, int resultCode, const QAndroidJniObject &data) override
     {
         if (receiverRequestCode == CreateRequestCode && written) {
@@ -234,7 +237,7 @@ struct AndroidDocumentPicker::Private
         QJniObject text = uri.callObjectMethod("toString", "()Ljava/lang/String;");
         qWarning("[pdfio] picked uri: %s", qPrintable(text.toString()));
 
-        const QString local = copyContentToCache(text.toString());
+        const QString local = copyContentToCache(text.toString(), pendingCacheName);
         qWarning("[pdfio] copied to %s (%lld bytes)", qPrintable(local),
                  qint64(local.isEmpty() ? 0 : QFileInfo(local).size()));
         if (local.isEmpty()) {
@@ -263,14 +266,30 @@ AndroidDocumentPicker::~AndroidDocumentPicker()
 
 void AndroidDocumentPicker::pickPdf(std::function<void(const QString &, const QString &)> onPicked)
 {
+    pickFile(QStringLiteral("application/pdf"), QStringLiteral("pdfio-picked.pdf"), onPicked);
+}
+
+void AndroidDocumentPicker::pickBundle(std::function<void(const QString &, const QString &)> onPicked)
+{
+    /// application/zip rather than a type invented for .pnb: the file really is a zip, so a file
+    /// manager that has never heard of .pnb still offers it.
+    pickFile(QStringLiteral("application/zip"), QStringLiteral("pdfio-picked.pnb"), onPicked);
+}
+
+void AndroidDocumentPicker::pickFile(const QString &mimeType,
+                                     const QString &cacheFileName,
+                                     std::function<void(const QString &, const QString &)> onPicked)
+{
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-    Q_UNUSED(onPicked);
+    Q_UNUSED(mimeType);
+    Q_UNUSED(cacheFileName);
     onPicked(QString(), QStringLiteral("the document picker is only wired for the Qt5 Android build"));
 #else
     d->callback = onPicked;
+    d->pendingCacheName = cacheFileName;
 
     QJniObject action = QJniObject::fromString(QStringLiteral("android.intent.action.OPEN_DOCUMENT"));
-    QJniObject type = QJniObject::fromString(QStringLiteral("application/pdf"));
+    QJniObject type = QJniObject::fromString(mimeType);
 
     QJniObject intent("android/content/Intent", "(Ljava/lang/String;)V", action.object<jstring>());
     intent.callObjectMethod("setType", "(Ljava/lang/String;)Landroid/content/Intent;", type.object<jstring>());
@@ -285,10 +304,26 @@ void AndroidDocumentPicker::pickPdf(std::function<void(const QString &, const QS
 }
 
 void AndroidDocumentPicker::createPdf(const QString &suggestedName,
+                                      const QString &localFile,
+                                      std::function<void(bool, const QString &)> onWritten)
+{
+    createFile(QStringLiteral("application/pdf"), suggestedName, localFile, onWritten);
+}
+
+void AndroidDocumentPicker::createBundle(const QString &suggestedName,
+                                         const QString &localFile,
+                                         std::function<void(bool, const QString &)> onWritten)
+{
+    createFile(QStringLiteral("application/zip"), suggestedName, localFile, onWritten);
+}
+
+void AndroidDocumentPicker::createFile(const QString &mimeType,
+                                       const QString &suggestedName,
                                        const QString &localFile,
                                        std::function<void(bool, const QString &)> onWritten)
 {
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    Q_UNUSED(mimeType);
     Q_UNUSED(suggestedName);
     Q_UNUSED(localFile);
     onWritten(false, QStringLiteral("the document writer is only wired for the Qt5 Android build"));
@@ -297,7 +332,7 @@ void AndroidDocumentPicker::createPdf(const QString &suggestedName,
     d->pendingLocalFile = localFile;
 
     QJniObject action = QJniObject::fromString(QStringLiteral("android.intent.action.CREATE_DOCUMENT"));
-    QJniObject type = QJniObject::fromString(QStringLiteral("application/pdf"));
+    QJniObject type = QJniObject::fromString(mimeType);
     QJniObject titleKey = QJniObject::fromString(QStringLiteral("android.intent.extra.TITLE"));
     QJniObject title = QJniObject::fromString(suggestedName);
 
@@ -331,13 +366,43 @@ AndroidDocumentPicker::~AndroidDocumentPicker()
 
 void AndroidDocumentPicker::pickPdf(std::function<void(const QString &, const QString &)> onPicked)
 {
-    onPicked(QString(), QStringLiteral("no document picker on this platform"));
+    pickFile(QStringLiteral("application/pdf"), QStringLiteral("pdfio-picked.pdf"), onPicked);
 }
 
 void AndroidDocumentPicker::createPdf(const QString &suggestedName,
                                       const QString &localFile,
                                       std::function<void(bool, const QString &)> onWritten)
 {
+    createFile(QStringLiteral("application/pdf"), suggestedName, localFile, onWritten);
+}
+
+void AndroidDocumentPicker::pickBundle(std::function<void(const QString &, const QString &)> onPicked)
+{
+    pickFile(QStringLiteral("application/zip"), QStringLiteral("pdfio-picked.pnb"), onPicked);
+}
+
+void AndroidDocumentPicker::createBundle(const QString &suggestedName,
+                                         const QString &localFile,
+                                         std::function<void(bool, const QString &)> onWritten)
+{
+    createFile(QStringLiteral("application/zip"), suggestedName, localFile, onWritten);
+}
+
+void AndroidDocumentPicker::pickFile(const QString &mimeType,
+                                     const QString &cacheFileName,
+                                     std::function<void(const QString &, const QString &)> onPicked)
+{
+    Q_UNUSED(mimeType);
+    Q_UNUSED(cacheFileName);
+    onPicked(QString(), QStringLiteral("no document picker on this platform"));
+}
+
+void AndroidDocumentPicker::createFile(const QString &mimeType,
+                                       const QString &suggestedName,
+                                       const QString &localFile,
+                                       std::function<void(bool, const QString &)> onWritten)
+{
+    Q_UNUSED(mimeType);
     Q_UNUSED(suggestedName);
     Q_UNUSED(localFile);
     onWritten(false, QStringLiteral("no document writer on this platform"));
