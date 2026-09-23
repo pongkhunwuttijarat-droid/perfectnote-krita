@@ -105,6 +105,30 @@ if (Poppler_Qt${QT_MAJOR_VERSION}_FOUND)
     set_target_properties(PdfExporterTest PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+    # The bounded page window is plain bookkeeping over the manifest, so it compiles into a test
+    # without Poppler, Krita or a QPA platform -- which is the point: the rule that a dirty page is
+    # never evicted can be exercised in ctest instead of only inside a running application.
+    add_executable(PdfPageWindowTest
+        PdfPageWindowTest.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../session/PdfPageWindow.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../session/PdfSession.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../session/PdfSessionManifest.cpp
+        )
+
+    target_include_directories(PdfPageWindowTest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+    target_link_libraries(PdfPageWindowTest PRIVATE
+        Qt${QT_MAJOR_VERSION}::Core
+        Qt${QT_MAJOR_VERSION}::Gui
+        Qt${QT_MAJOR_VERSION}::Test)
+
+    set_target_properties(PdfPageWindowTest PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+    add_test(NAME pdfio-PdfPageWindowTest COMMAND PdfPageWindowTest)
+    set_tests_properties(pdfio-PdfPageWindowTest PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
     add_executable(PdfStripLayoutTest
         PdfStripLayoutTest.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../session/PdfSessionManifest.cpp

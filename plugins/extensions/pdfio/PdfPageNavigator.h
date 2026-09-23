@@ -10,6 +10,7 @@
 /// Included rather than forward declared: the navigator holds a QScopedPointer to it, and that
 /// needs the complete type for its destructor.
 #include "backend/PdfRenderBackend.h"
+#include "session/PdfPageWindow.h"
 #include "session/PdfSessionManifest.h"
 #include "session/PdfStripLayout.h"
 
@@ -98,6 +99,10 @@ public:
 
     /// What the export needs to walk the notebook and find its source.
     const PdfSessionManifest &manifest() const;
+
+    /// Which pages are open, and what the policy has had to do to keep that bounded. Exposed so
+    /// the page selector can show the window and so the counters are observable without a debugger.
+    const PdfPageWindow &pageWindow() const;
     QString sourcePath() const;
     int pageCount() const;
     int currentIndex() const;
@@ -112,7 +117,9 @@ Q_SIGNALS:
     void thumbnailReady(int index);
 
 private:
-    PdfPageNavigator() = default;
+    /// Installs the window's save hook and sets its bound to the current scope, once. The page
+    /// switch then cannot run without the policy in front of it.
+    PdfPageNavigator();
 
     /// Closes the page that is open, freeing its document and its view.
     void closeCurrentPage();
@@ -176,6 +183,17 @@ private:
     /// deliberately, so the notebook is usable while the strip is finished.
     int m_scope = 1;
     qreal m_dpi = 200.0;
+
+    /**
+     * Which pages may stay open, and the rule that keeps closing one from losing ink.
+     *
+     * Its bound is \ref m_scope, so design A is a window of one and design B would be a window of
+     * three. What it adds over the old "opening a page closes the one before it" is the dirty
+     * flag: a page with unsaved ink is never the one that is dropped. When every slot holds such a
+     * page, the least recently used one is saved to make room, and a save that fails refuses the
+     * page turn instead of discarding the page.
+     */
+    PdfPageWindow m_window;
 
     /// The pages the open strip holds and where each sits. Empty when the document is a single
     /// page, which is also how the code tells the two apart.

@@ -105,6 +105,15 @@ constexpr qreal ThumbnailRenderDpi = 96;
 
 } // namespace
 
+PdfPageNavigator::PdfPageNavigator()
+{
+    /// The window's save is the plugin's own page save: the ink-only document, the crop when the
+    /// page lives in a strip, and the asynchronous write saveCurrentPage already owns. Wired once
+    /// here rather than at each call site, so no page switch can run without it.
+    m_window.setCapacity(m_scope);
+    m_window.setSaver([this](int index, QString *why) { return saveCurrentPage(why, index); });
+}
+
 PdfPageNavigator *PdfPageNavigator::instance()
 {
     static PdfPageNavigator navigator;
@@ -336,6 +345,11 @@ const PdfSessionManifest &PdfPageNavigator::manifest() const
     return m_manifest;
 }
 
+const PdfPageWindow &PdfPageNavigator::pageWindow() const
+{
+    return m_window;
+}
+
 QString PdfPageNavigator::sourcePath() const
 {
     return PdfSession::sourcePath(m_projectDir, m_manifest.sourceFile);
@@ -396,6 +410,19 @@ bool PdfPageNavigator::openNotebook(const QString &pdfPath, QString *why)
     }
 
     say(QStringLiteral("project ready: %1 pages at %2").arg(manifest.pages.size()).arg(projectDir));
+
+    /// A page of a notebook that is being replaced is written before the new manifest takes over:
+    /// after the assignment below, its index and its file name would be read out of the new file.
+    if (m_document && m_document->image() && m_index >= 0) {
+        QString saveError;
+        if (!saveCurrentPage(&saveError)) {
+            say(QStringLiteral("could not save the page of the notebook being replaced: %1").arg(saveError));
+        }
+    }
+
+    /// The new notebook starts with an empty window, and its counters describe one notebook rather
+    /// than the whole process.
+    m_window.clear();
 
     m_projectDir = projectDir;
     m_manifest = manifest;
@@ -618,6 +645,9 @@ int PdfPageNavigator::scope() const
 void PdfPageNavigator::setScope(int scope)
 {
     m_scope = qMax(1, scope);
+    /// The window bound follows the scope: design A is one page, design B would be three. Pages
+    /// already open are not thrown out here; the extra slots are given back on the next page turn.
+    m_window.setCapacity(m_scope);
 }
 
 bool PdfPageNavigator::showPage(int index, QString *why)
@@ -631,13 +661,28 @@ bool PdfPageNavigator::showPage(int index, QString *why)
         return false;
     }
 
-    /// Whatever happens next, the page that is open is written first. This has to come before the
-    /// page that is already in the strip is reached, or turning to a page next to the current one
-    /// would skip the save entirely -- which it did, and the artifact came out empty.
-    if (m_document && m_document->image() && m_index != index) {
-        QString saveError;
-        if (!saveCurrentPage(&saveError)) {
-            say(QStringLiteral("could not save the page being left: %1").arg(saveError));
+    /// Whether the page that is open has to be written before the next one can take its place is
+    /// the bounded window's decision, not a save here. It evicts the least recently used clean page
+    /// for free, saves a dirty page before letting it go, and -- the case that used to lose ink --
+    /// refuses the whole page turn when that save cannot be made. Nothing is dropped to make room.
+    ///
+    /// The dirty flag is the document's own modified flag. Krita sets it when a stroke lands
+    /// (sigImageModified through KisDocument::setImageModified) and clears it when the page is
+    /// written, so the window is told what the document actually holds rather than trusting a
+    /// signal the switch might have missed. Scope one is design A: one document, one page, so the
+    /// document's flag is the page's flag. The strip (design B) keeps several pages in one document
+    /// and has its own save ordering -- it is off at scope one, and it is left alone here.
+    if (m_stripPages.isEmpty() && m_document && m_document->image() && m_index != index
+        && m_window.isOpen(m_index)) {
+        m_window.setDirty(m_index, m_document->isModified());
+    }
+
+    if (m_stripPages.isEmpty() && m_index != index) {
+        QString windowError;
+        if (!m_window.open(index, &windowError)) {
+            fail(why, windowError);
+            say(QStringLiteral("page turn refused: %1").arg(windowError));
+            return false;
         }
     }
 
@@ -657,7 +702,15 @@ bool PdfPageNavigator::showPage(int index, QString *why)
         say(QStringLiteral("strip: rolling was not possible (%1); building instead").arg(rollError));
     }
 
-    return m_scope > 1 ? buildForStrip(index, why) : buildForSinglePage(index, why);
+    const bool opened = m_scope > 1 ? buildForStrip(index, why) : buildForSinglePage(index, why);
+    if (!opened && m_stripPages.isEmpty() && m_document && m_document->image() && m_index >= 0) {
+        /// The page that is open never moved -- showImage did not run -- so put it back in the
+        /// window. The eviction above was made on the promise that the new page would take the
+        /// slot, and that promise is off when the build fails.
+        m_window.open(m_index, nullptr);
+    }
+
+    return opened;
 }
 
 bool PdfPageNavigator::buildForSinglePage(int index, QString *why)
