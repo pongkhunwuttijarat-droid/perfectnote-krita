@@ -7,7 +7,8 @@
 #include "PdfExporter.h"
 
 #include <QFile>
-#include <QRegularExpression>
+#include <QHash>
+#include <QSet>
 #include <QTransform>
 
 namespace {
@@ -22,44 +23,1285 @@ void fail(QString *why, const QString &message)
     }
 }
 
-/// Object number -> body, for a file whose objects are all plain. Object streams are handled by
-/// refusing them, not by guessing.
-QHash<int, QByteArray> splitObjects(const QByteArray &pdf)
+// ---------------------------------------------------------------------------------------------
+// A small, self-contained PDF reader.
+//
+// The writer is an incremental update, so it has to read exactly three things out of the source:
+// where the page objects are, what the page dictionaries say, and where the previous xref lives.
+// That is small enough to do here, in pure C++, with no renderer dependency -- which is the point,
+// since the same code runs on Android where there is no Poppler.
+//
+// It understands both cross reference forms: the classic "xref" table and the PDF 1.5
+// cross reference *stream* (/Type /XRef), plus objects packed into object streams (/Type /ObjStm)
+// and the FlateDecode + PNG/TIFF predictors those streams usually carry. Anything it cannot read
+// is refused with a precise message instead of being written out as a file that only looks right.
+// ---------------------------------------------------------------------------------------------
+
+bool isWhite(char c)
 {
-    QHash<int, QByteArray> objects;
-    QRegularExpression re(QStringLiteral("(?:^|[\\r\\n])(\\d+)\\s+0\\s+obj\\s*(.*?)\\s*endobj"),
-                          QRegularExpression::DotMatchesEverythingOption);
-    QRegularExpressionMatchIterator it = re.globalMatch(QString::fromLatin1(pdf));
-    while (it.hasNext()) {
-        const QRegularExpressionMatch match = it.next();
-        objects.insert(match.captured(1).toInt(), match.captured(2).toLatin1());
-    }
-    return objects;
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == '\0';
 }
 
-QList<int> kidsOf(const QHash<int, QByteArray> &objects, int objectNumber)
+bool isDelimiter(char c)
 {
-    QList<int> kids;
-    const QByteArray body = objects.value(objectNumber);
-    const int at = body.indexOf("/Kids");
-    if (at < 0) {
-        return kids;
-    }
-
-    const int open = body.indexOf('[', at);
-    const int close = body.indexOf(']', open);
-    if (open < 0 || close < 0) {
-        return kids;
-    }
-
-    const QString list = QString::fromLatin1(body.mid(open, close - open));
-    QRegularExpression re(QStringLiteral("(\\d+)\\s+0\\s+R"));
-    QRegularExpressionMatchIterator it = re.globalMatch(list);
-    while (it.hasNext()) {
-        kids.append(it.next().captured(1).toInt());
-    }
-    return kids;
+    return isWhite(c) || c == '(' || c == ')' || c == '<' || c == '>' || c == '[' || c == ']'
+        || c == '{' || c == '}' || c == '/' || c == '%';
 }
+
+int skipWhite(const QByteArray &bytes, int i)
+{
+    while (i < bytes.size() && isWhite(bytes.at(i))) {
+        ++i;
+    }
+    return i;
+}
+
+bool readInt(const QByteArray &bytes, int *i, qint64 *value)
+{
+    int p = skipWhite(bytes, *i);
+    const int start = p;
+    if (p < bytes.size() && (bytes.at(p) == '+' || bytes.at(p) == '-')) {
+        ++p;
+    }
+    const int digits = p;
+    while (p < bytes.size() && bytes.at(p) >= '0' && bytes.at(p) <= '9') {
+        ++p;
+    }
+    if (p == digits) {
+        return false;
+    }
+    *value = bytes.mid(start, p - start).toLongLong();
+    *i = p;
+    return true;
+}
+
+/// Index just past the ">>" closing the dictionary that starts at \a start. Handles nested
+/// dictionaries, literal strings (with escapes and nested parens), hex strings and comments, so
+/// that a ">>" inside a string does not end the dictionary early.
+int dictEndIndex(const QByteArray &bytes, int start)
+{
+    if (start < 0 || bytes.mid(start, 2) != "<<") {
+        return -1;
+    }
+    int depth = 0;
+    int i = start;
+    while (i < bytes.size()) {
+        const char c = bytes.at(i);
+        if (c == '(') {
+            ++i;
+            int parens = 1;
+            while (i < bytes.size() && parens > 0) {
+                const char d = bytes.at(i);
+                if (d == '\\') {
+                    i += 2;
+                    continue;
+                }
+                if (d == '(') {
+                    ++parens;
+                } else if (d == ')') {
+                    --parens;
+                }
+                ++i;
+            }
+            continue;
+        }
+        if (c == '<') {
+            if (i + 1 < bytes.size() && bytes.at(i + 1) == '<') {
+                ++depth;
+                i += 2;
+                continue;
+            }
+            ++i;
+            while (i < bytes.size() && bytes.at(i) != '>') {
+                ++i;
+            }
+            if (i < bytes.size()) {
+                ++i;
+            }
+            continue;
+        }
+        if (c == '>' && i + 1 < bytes.size() && bytes.at(i + 1) == '>') {
+            --depth;
+            i += 2;
+            if (depth == 0) {
+                return i;
+            }
+            continue;
+        }
+        if (c == '%') {
+            while (i < bytes.size() && bytes.at(i) != '\n' && bytes.at(i) != '\r') {
+                ++i;
+            }
+            continue;
+        }
+        ++i;
+    }
+    return -1;
+}
+
+/// Index of the value that follows "/Key" inside the dictionary [dictStart, dictEnd), or -1.
+/// The key has to end on a delimiter, so "/Size" never matches inside "/SizeX".
+int dictValueAt(const QByteArray &bytes, int dictStart, int dictEnd, const char *key)
+{
+    const QByteArray needle = QByteArray("/") + key;
+    int at = dictStart;
+    while (at >= 0 && at < dictEnd) {
+        at = bytes.indexOf(needle, at);
+        if (at < 0 || at >= dictEnd) {
+            return -1;
+        }
+        const int after = at + needle.size();
+        if (after < bytes.size() && !isDelimiter(bytes.at(after))) {
+            at = after;
+            continue;
+        }
+        return after;
+    }
+    return -1;
+}
+
+bool dictIntValue(const QByteArray &bytes, int dictStart, int dictEnd, const char *key, qint64 *value)
+{
+    const int v = dictValueAt(bytes, dictStart, dictEnd, key);
+    if (v < 0) {
+        return false;
+    }
+    int i = v;
+    return readInt(bytes, &i, value);
+}
+
+bool dictRefValue(const QByteArray &bytes, int dictStart, int dictEnd, const char *key,
+                  int *number, int *generation)
+{
+    const int v = dictValueAt(bytes, dictStart, dictEnd, key);
+    if (v < 0) {
+        return false;
+    }
+    int i = v;
+    qint64 n = 0;
+    qint64 g = 0;
+    if (!readInt(bytes, &i, &n) || !readInt(bytes, &i, &g)) {
+        return false;
+    }
+    i = skipWhite(bytes, i);
+    if (i >= bytes.size() || bytes.at(i) != 'R') {
+        return false;
+    }
+    *number = int(n);
+    *generation = int(g);
+    return true;
+}
+
+/// A slice of a dictionary-valued value: [start, end) with start/end inside \a bytes.
+struct DictSlice {
+    int start = -1;
+    int end = -1;
+    bool valid() const { return start >= 0 && end > start; }
+};
+
+/// The slice of "Key << ... >>" if the value is a dictionary, or of the n-th dictionary when the
+/// value is an array of dictionaries. Used for /DecodeParms.
+bool dictDictValue(const QByteArray &bytes, int dictStart, int dictEnd, const char *key, int index,
+                   DictSlice *out)
+{
+    const int v = dictValueAt(bytes, dictStart, dictEnd, key);
+    if (v < 0) {
+        return false;
+    }
+    int i = skipWhite(bytes, v);
+    if (bytes.mid(i, 2) == "<<") {
+        if (index > 0) {
+            return false;
+        }
+        const int e = dictEndIndex(bytes, i);
+        if (e < 0) {
+            return false;
+        }
+        out->start = i;
+        out->end = e;
+        return true;
+    }
+    if (i < bytes.size() && bytes.at(i) == '[') {
+        ++i;
+        int seen = 0;
+        while (i < bytes.size() && bytes.at(i) != ']') {
+            i = skipWhite(bytes, i);
+            if (bytes.mid(i, 2) == "<<") {
+                const int e = dictEndIndex(bytes, i);
+                if (e < 0) {
+                    return false;
+                }
+                if (seen == index) {
+                    out->start = i;
+                    out->end = e;
+                    return true;
+                }
+                ++seen;
+                i = e;
+                continue;
+            }
+            ++i;
+        }
+    }
+    return false;
+}
+
+/// Names of a value that is a name or an array of names. An empty list means the key is absent;
+/// an unreadable value yields an empty list too and the caller refuses later if that matters.
+QList<QByteArray> dictNames(const QByteArray &bytes, int dictStart, int dictEnd, const char *key)
+{
+    QList<QByteArray> names;
+    const int v = dictValueAt(bytes, dictStart, dictEnd, key);
+    if (v < 0) {
+        return names;
+    }
+    auto readName = [&bytes](int *i, QByteArray *name) {
+        *i = skipWhite(bytes, *i);
+        if (*i >= bytes.size() || bytes.at(*i) != '/') {
+            return false;
+        }
+        int s = *i + 1;
+        int e = s;
+        while (e < bytes.size() && !isDelimiter(bytes.at(e))) {
+            ++e;
+        }
+        *name = bytes.mid(s, e - s);
+        *i = e;
+        return true;
+    };
+
+    int i = skipWhite(bytes, v);
+    if (i < bytes.size() && bytes.at(i) == '[') {
+        ++i;
+        while (i < bytes.size() && bytes.at(i) != ']') {
+            QByteArray name;
+            if (!readName(&i, &name)) {
+                ++i;
+                continue;
+            }
+            names.append(name);
+        }
+        return names;
+    }
+    QByteArray name;
+    if (readName(&i, &name)) {
+        names.append(name);
+    }
+    return names;
+}
+
+bool dictInts(const QByteArray &bytes, int dictStart, int dictEnd, const char *key, QList<qint64> *out)
+{
+    const int v = dictValueAt(bytes, dictStart, dictEnd, key);
+    if (v < 0) {
+        return false;
+    }
+    int i = skipWhite(bytes, v);
+    if (i >= bytes.size() || bytes.at(i) != '[') {
+        qint64 single = 0;
+        if (readInt(bytes, &i, &single)) {
+            out->append(single);
+            return true;
+        }
+        return false;
+    }
+    ++i;
+    while (i < bytes.size() && bytes.at(i) != ']') {
+        i = skipWhite(bytes, i);
+        if (i < bytes.size() && bytes.at(i) == ']') {
+            break;
+        }
+        qint64 n = 0;
+        if (!readInt(bytes, &i, &n)) {
+            ++i;
+            continue;
+        }
+        out->append(n);
+    }
+    return !out->isEmpty();
+}
+
+/// Indirect references of an array value, generation included.
+QList<QPair<int, int>> dictRefs(const QByteArray &bytes, int dictStart, int dictEnd, const char *key)
+{
+    QList<QPair<int, int>> refs;
+    const int v = dictValueAt(bytes, dictStart, dictEnd, key);
+    if (v < 0) {
+        return refs;
+    }
+    int i = skipWhite(bytes, v);
+    if (i >= bytes.size() || bytes.at(i) != '[') {
+        return refs;
+    }
+    ++i;
+    while (i < bytes.size() && bytes.at(i) != ']') {
+        i = skipWhite(bytes, i);
+        if (i < bytes.size() && bytes.at(i) == ']') {
+            break;
+        }
+        const int save = i;
+        qint64 n = 0;
+        qint64 g = 0;
+        if (readInt(bytes, &i, &n) && readInt(bytes, &i, &g)) {
+            const int p = skipWhite(bytes, i);
+            if (p < bytes.size() && bytes.at(p) == 'R') {
+                refs.append(QPair<int, int>(int(n), int(g)));
+                i = p + 1;
+                continue;
+            }
+        }
+        i = save + 1;
+    }
+    return refs;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Stream decoding: FlateDecode with the PNG and TIFF predictors real producers use.
+// ---------------------------------------------------------------------------------------------
+
+int paeth(int a, int b, int c)
+{
+    const int p = a + b - c;
+    const int pa = qAbs(p - a);
+    const int pb = qAbs(p - b);
+    const int pc = qAbs(p - c);
+    if (pa <= pb && pa <= pc) {
+        return a;
+    }
+    if (pb <= pc) {
+        return b;
+    }
+    return c;
+}
+
+QByteArray applyPredictor(const QByteArray &data, int predictor, int colors, int bits, int columns,
+                          QString *why)
+{
+    if (predictor <= 1) {
+        return data;
+    }
+    if (columns <= 0 || colors <= 0 || bits <= 0) {
+        fail(why, QStringLiteral("a stream declares an unusable /DecodeParms predictor"));
+        return {};
+    }
+
+    const int bpp = qMax(1, (colors * bits) / 8);
+    const int rowBytes = (colors * bits * columns + 7) / 8;
+
+    if (predictor == 2) {
+        if (bits != 8) {
+            fail(why, QStringLiteral("a stream uses the TIFF predictor with %1 bits per "
+                                     "component, which the exporter does not implement")
+                          .arg(bits));
+            return {};
+        }
+        QByteArray out = data;
+        const int rows = out.size() / rowBytes;
+        for (int r = 0; r < rows; ++r) {
+            char *row = out.data() + r * rowBytes;
+            for (int j = bpp; j < rowBytes; ++j) {
+                row[j] = char((static_cast<unsigned char>(row[j])
+                               + static_cast<unsigned char>(row[j - bpp])) & 0xff);
+            }
+        }
+        return out;
+    }
+
+    if (predictor < 10) {
+        fail(why, QStringLiteral("a stream declares the unknown predictor %1").arg(predictor));
+        return {};
+    }
+
+    if (rowBytes <= 0 || data.size() % (rowBytes + 1) != 0) {
+        fail(why, QStringLiteral("a PNG-predicted stream does not divide into %1 byte rows")
+                      .arg(rowBytes));
+        return {};
+    }
+
+    QByteArray out;
+    out.reserve(data.size());
+    QByteArray previous(rowBytes, '\0');
+    int i = 0;
+    while (i < data.size()) {
+        const int filter = static_cast<unsigned char>(data.at(i));
+        ++i;
+        QByteArray row = data.mid(i, rowBytes);
+        i += rowBytes;
+        for (int j = 0; j < rowBytes; ++j) {
+            const int raw = static_cast<unsigned char>(row.at(j));
+            const int left = j >= bpp ? static_cast<unsigned char>(row.at(j - bpp)) : 0;
+            const int up = static_cast<unsigned char>(previous.at(j));
+            const int upLeft = j >= bpp ? static_cast<unsigned char>(previous.at(j - bpp)) : 0;
+            int value = 0;
+            switch (filter) {
+            case 0:
+                value = raw;
+                break;
+            case 1:
+                value = raw + left;
+                break;
+            case 2:
+                value = raw + up;
+                break;
+            case 3:
+                value = raw + ((left + up) / 2);
+                break;
+            case 4:
+                value = raw + paeth(left, up, upLeft);
+                break;
+            default:
+                fail(why, QStringLiteral("a PNG-predicted stream uses the unknown filter type %1")
+                              .arg(filter));
+                return {};
+            }
+            row[j] = char(value & 0xff);
+        }
+        out += row;
+        previous = row;
+    }
+    return out;
+}
+
+bool decodeStream(const QByteArray &bytes, int dictStart, int dictEnd, const QByteArray &raw,
+                  QByteArray *out, QString *why)
+{
+    const QList<QByteArray> filters = dictNames(bytes, dictStart, dictEnd, "Filter");
+    if (filters.isEmpty()) {
+        *out = raw;
+        return true;
+    }
+
+    QByteArray data = raw;
+    for (int fi = 0; fi < filters.size(); ++fi) {
+        const QByteArray filter = filters.at(fi);
+        if (filter != "FlateDecode" && filter != "Fl") {
+            fail(why, QStringLiteral("the PDF uses the unsupported stream filter /%1")
+                          .arg(QString::fromLatin1(filter)));
+            return false;
+        }
+        if (data.isEmpty()) {
+            *out = QByteArray();
+            return true;
+        }
+        /// qUncompress wants the four byte length header qCompress writes. Qt inflates into a
+        /// correctly sized buffer regardless of the number in the header, so a zero header is a
+        /// safe placeholder -- verified against the Qt this plugin builds with.
+        const QByteArray inflated = qUncompress(QByteArray(4, '\0') + data);
+        if (inflated.isNull()) {
+            fail(why, QStringLiteral("a FlateDecode stream in the PDF could not be inflated"));
+            return false;
+        }
+        data = inflated;
+
+        DictSlice parms;
+        if (dictDictValue(bytes, dictStart, dictEnd, "DecodeParms", fi, &parms)) {
+            qint64 predictor = 1;
+            qint64 colors = 1;
+            qint64 bits = 8;
+            qint64 columns = 1;
+            dictIntValue(bytes, parms.start, parms.end, "Predictor", &predictor);
+            dictIntValue(bytes, parms.start, parms.end, "Colors", &colors);
+            dictIntValue(bytes, parms.start, parms.end, "BitsPerComponent", &bits);
+            const bool haveColumns = dictIntValue(bytes, parms.start, parms.end, "Columns", &columns);
+            if (predictor > 1 && !haveColumns) {
+                fail(why, QStringLiteral("a predicted stream has no /Columns"));
+                return false;
+            }
+            data = applyPredictor(data, int(predictor), int(colors), int(bits), int(columns), why);
+            if (data.isNull()) {
+                return false;
+            }
+        }
+    }
+    *out = data;
+    return true;
+}
+
+/// A stream's raw bytes plus the extent of the dictionary that describes it.
+struct StreamSlice {
+    int dictStart = -1;
+    int dictEnd = -1;
+    QByteArray raw;
+};
+
+/// Reads the indirect object at \a offset and reports its stream, if it is a stream object.
+bool streamAt(const QByteArray &bytes, qint64 offset, StreamSlice *slice, int *objectEnd)
+{
+    if (offset < 0 || offset >= bytes.size()) {
+        return false;
+    }
+    int i = int(offset);
+    qint64 number = 0;
+    qint64 generation = 0;
+    if (!readInt(bytes, &i, &number) || !readInt(bytes, &i, &generation)) {
+        return false;
+    }
+    i = skipWhite(bytes, i);
+    if (bytes.mid(i, 3) != "obj") {
+        return false;
+    }
+    const int dictStart = skipWhite(bytes, i + 3);
+    if (bytes.mid(dictStart, 2) != "<<") {
+        return false;
+    }
+    const int dictEnd = dictEndIndex(bytes, dictStart);
+    if (dictEnd < 0) {
+        return false;
+    }
+    int s = skipWhite(bytes, dictEnd);
+    if (bytes.mid(s, 6) != "stream") {
+        return false;
+    }
+    int dataStart = s + 6;
+    if (dataStart < bytes.size() && bytes.at(dataStart) == '\r') {
+        ++dataStart;
+    }
+    if (dataStart < bytes.size() && bytes.at(dataStart) == '\n') {
+        ++dataStart;
+    }
+
+    int dataEnd = -1;
+    qint64 length = -1;
+    if (dictIntValue(bytes, dictStart, dictEnd, "Length", &length)
+        && length >= 0 && dataStart + length <= bytes.size()) {
+        dataEnd = int(dataStart + length);
+    }
+    if (dataEnd < 0) {
+        /// /Length may be an indirect reference; fall back to the endstream keyword.
+        dataEnd = int(bytes.indexOf("endstream", dataStart));
+        if (dataEnd < 0) {
+            return false;
+        }
+        if (dataEnd > dataStart && bytes.at(dataEnd - 1) == '\n') {
+            --dataEnd;
+        }
+        if (dataEnd > dataStart && bytes.at(dataEnd - 1) == '\r') {
+            --dataEnd;
+        }
+    }
+
+    int after = skipWhite(bytes, dataEnd);
+    if (bytes.mid(after, 9) != "endstream") {
+        const int at = int(bytes.indexOf("endstream", dataEnd));
+        if (at < 0) {
+            return false;
+        }
+        after = at;
+    }
+    after = skipWhite(bytes, after + 9);
+    *objectEnd = bytes.mid(after, 6) == "endobj" ? after + 6 : -1;
+
+    slice->dictStart = dictStart;
+    slice->dictEnd = dictEnd;
+    slice->raw = bytes.mid(dataStart, dataEnd - dataStart);
+    return true;
+}
+
+/// Body of the indirect object at \a offset: its dictionary and stream if it has one. The body
+/// never includes the trailing "endobj".
+bool objectBodyAt(const QByteArray &bytes, qint64 offset, QByteArray *body)
+{
+    if (offset < 0 || offset >= bytes.size()) {
+        return false;
+    }
+    int i = int(offset);
+    qint64 number = 0;
+    qint64 generation = 0;
+    if (!readInt(bytes, &i, &number) || !readInt(bytes, &i, &generation)) {
+        return false;
+    }
+    i = skipWhite(bytes, i);
+    if (bytes.mid(i, 3) != "obj") {
+        return false;
+    }
+    const int bodyStart = skipWhite(bytes, i + 3);
+    if (bytes.mid(bodyStart, 2) != "<<") {
+        return false;
+    }
+    const int dictEnd = dictEndIndex(bytes, bodyStart);
+    if (dictEnd < 0) {
+        return false;
+    }
+
+    const int afterDict = skipWhite(bytes, dictEnd);
+    if (bytes.mid(afterDict, 6) == "stream") {
+        StreamSlice slice;
+        int objectEnd = -1;
+        if (!streamAt(bytes, offset, &slice, &objectEnd) || objectEnd < 0) {
+            return false;
+        }
+        *body = bytes.mid(bodyStart, objectEnd - 6 - bodyStart);
+        return true;
+    }
+
+    const int endobj = int(bytes.indexOf("endobj", dictEnd));
+    if (endobj < 0) {
+        return false;
+    }
+    *body = bytes.mid(bodyStart, endobj - bodyStart);
+    return true;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Cross reference chain and object access.
+// ---------------------------------------------------------------------------------------------
+
+struct XrefEntry {
+    int type = 0;     ///< 0 unused, 1 uncompressed, 2 inside an object stream
+    qint64 first = 0; ///< type 1: byte offset; type 2: object stream number
+    int second = 0;   ///< type 1: generation; type 2: index inside the object stream
+};
+
+struct ObjectStream {
+    QByteArray data;
+    int first = 0;
+    QList<int> numbers;
+    QList<int> offsets;
+};
+
+struct XrefTail {
+    bool hasPrev = false;
+    qint64 prev = 0;
+    qint64 xrefStm = -1;
+    int root = -1;
+    int rootGeneration = 0;
+    bool hasRoot = false;
+    bool encrypted = false;
+    qint64 size = -1;
+    bool hasInfo = false;
+    int infoNumber = 0;
+    int infoGeneration = 0;
+    bool hasId = false;
+    QByteArray id;
+};
+
+struct PdfDocument {
+    QByteArray bytes;
+    QHash<int, XrefEntry> xref;
+    QHash<int, QByteArray> cache;
+    QHash<int, ObjectStream> objectStreams;
+    QSet<int> resolving;
+    int size = 0;
+    int rootNumber = -1;
+    int rootGeneration = 0;
+    bool encrypted = false;
+    bool hasInfo = false;
+    int infoNumber = 0;
+    int infoGeneration = 0;
+    bool hasId = false;
+    QByteArray id;
+    qint64 newestXrefOffset = 0;
+};
+
+void tailFromDict(PdfDocument *doc, const QByteArray &bytes, int dictStart, int dictEnd,
+                  XrefTail *tail)
+{
+    int number = 0;
+    int generation = 0;
+    if (dictRefValue(bytes, dictStart, dictEnd, "Root", &number, &generation)) {
+        tail->root = number;
+        tail->rootGeneration = generation;
+        tail->hasRoot = true;
+    }
+    qint64 size = -1;
+    if (dictIntValue(bytes, dictStart, dictEnd, "Size", &size)) {
+        tail->size = size;
+    }
+    qint64 prev = 0;
+    if (dictIntValue(bytes, dictStart, dictEnd, "Prev", &prev)) {
+        tail->hasPrev = true;
+        tail->prev = prev;
+    }
+    qint64 xrefStm = 0;
+    if (dictIntValue(bytes, dictStart, dictEnd, "XRefStm", &xrefStm)) {
+        tail->xrefStm = xrefStm;
+    }
+    if (dictValueAt(bytes, dictStart, dictEnd, "Encrypt") >= 0) {
+        tail->encrypted = true;
+    }
+    if (dictRefValue(bytes, dictStart, dictEnd, "Info", &number, &generation)) {
+        tail->hasInfo = true;
+        tail->infoNumber = number;
+        tail->infoGeneration = generation;
+    }
+    const int idAt = dictValueAt(bytes, dictStart, dictEnd, "ID");
+    if (idAt >= 0) {
+        int i = skipWhite(bytes, idAt);
+        if (i < bytes.size() && bytes.at(i) == '[') {
+            const int close = int(bytes.indexOf(']', i));
+            if (close > i) {
+                tail->hasId = true;
+                tail->id = bytes.mid(i, close - i + 1);
+            }
+        }
+    }
+    Q_UNUSED(doc);
+}
+
+bool readClassicXref(PdfDocument *doc, int offset, XrefTail *tail, QString *why)
+{
+    const QByteArray &bytes = doc->bytes;
+    int i = offset + 4; ///< past "xref"
+    while (true) {
+        i = skipWhite(bytes, i);
+        if (i >= bytes.size()) {
+            fail(why, QStringLiteral("a classic xref table ends without a trailer"));
+            return false;
+        }
+        if (bytes.mid(i, 7) == "trailer") {
+            break;
+        }
+        qint64 start = 0;
+        qint64 count = 0;
+        if (!readInt(bytes, &i, &start) || !readInt(bytes, &i, &count) || count < 0) {
+            fail(why, QStringLiteral("a classic xref subsection header is unreadable"));
+            return false;
+        }
+        for (qint64 k = 0; k < count; ++k) {
+            i = skipWhite(bytes, i);
+            if (i + 18 > bytes.size()) {
+                fail(why, QStringLiteral("a classic xref table is truncated"));
+                return false;
+            }
+            const qint64 entryOffset = bytes.mid(i, 10).trimmed().toLongLong();
+            i += 10;
+            i = skipWhite(bytes, i);
+            const qint64 generation = bytes.mid(i, 5).trimmed().toLongLong();
+            i += 5;
+            i = skipWhite(bytes, i);
+            const char type = bytes.at(i);
+            ++i;
+            const int number = int(start + k);
+            if (type == 'n' && !doc->xref.contains(number)) {
+                doc->xref.insert(number, XrefEntry{1, entryOffset, int(generation)});
+            }
+        }
+    }
+
+    const int dictStart = skipWhite(bytes, i + 7);
+    const int dictEnd = dictEndIndex(bytes, dictStart);
+    if (dictEnd < 0) {
+        fail(why, QStringLiteral("the xref trailer is not a dictionary"));
+        return false;
+    }
+    tailFromDict(doc, bytes, dictStart, dictEnd, tail);
+    return true;
+}
+
+bool readXrefStream(PdfDocument *doc, int offset, XrefTail *tail, QString *why)
+{
+    const QByteArray &bytes = doc->bytes;
+    StreamSlice slice;
+    int objectEnd = -1;
+    if (!streamAt(bytes, offset, &slice, &objectEnd)) {
+        fail(why, QStringLiteral("the offset %1 in startxref points at neither a cross reference "
+                                 "table nor a cross reference stream")
+                      .arg(offset));
+        return false;
+    }
+    if (!bytes.mid(slice.dictStart, slice.dictEnd - slice.dictStart).contains("/XRef")) {
+        fail(why, QStringLiteral("the object at the startxref offset is not an /XRef stream"));
+        return false;
+    }
+
+    QByteArray data;
+    if (!decodeStream(bytes, slice.dictStart, slice.dictEnd, slice.raw, &data, why)) {
+        return false;
+    }
+
+    QList<qint64> widths;
+    if (!dictInts(bytes, slice.dictStart, slice.dictEnd, "W", &widths) || widths.isEmpty()) {
+        fail(why, QStringLiteral("a cross reference stream has no readable /W"));
+        return false;
+    }
+    while (widths.size() < 3) {
+        widths.append(0);
+    }
+    const int w0 = int(widths.at(0));
+    const int w1 = int(widths.at(1));
+    const int w2 = int(widths.at(2));
+    const int rowBytes = w0 + w1 + w2;
+    if (rowBytes <= 0 || rowBytes > 64) {
+        fail(why, QStringLiteral("a cross reference stream declares an unusable /W"));
+        return false;
+    }
+
+    QList<qint64> index;
+    if (!dictInts(bytes, slice.dictStart, slice.dictEnd, "Index", &index)) {
+        qint64 size = 0;
+        dictIntValue(bytes, slice.dictStart, slice.dictEnd, "Size", &size);
+        index = {0, size};
+    }
+
+    int position = 0;
+    for (int p = 0; p + 1 < index.size(); p += 2) {
+        const int start = int(index.at(p));
+        const qint64 count = index.at(p + 1);
+        for (qint64 k = 0; k < count; ++k) {
+            if (position + rowBytes > data.size()) {
+                fail(why, QStringLiteral("a cross reference stream is shorter than its /W and "
+                                         "/Index describe"));
+                return false;
+            }
+            qint64 fields[3] = {1, 0, 0};
+            const int fieldWidths[3] = {w0, w1, w2};
+            for (int f = 0; f < 3; ++f) {
+                qint64 value = 0;
+                for (int byte = 0; byte < fieldWidths[f]; ++byte) {
+                    value = (value << 8) | static_cast<unsigned char>(data.at(position++));
+                }
+                fields[f] = value;
+            }
+            const int type = w0 > 0 ? int(fields[0]) : 1;
+            const int number = start + int(k);
+            if (!doc->xref.contains(number)) {
+                if (type == 1) {
+                    doc->xref.insert(number, XrefEntry{1, fields[1], int(fields[2])});
+                } else if (type == 2) {
+                    doc->xref.insert(number, XrefEntry{2, fields[1], int(fields[2])});
+                }
+            }
+        }
+    }
+
+    tailFromDict(doc, bytes, slice.dictStart, slice.dictEnd, tail);
+    return true;
+}
+
+bool readXrefSection(PdfDocument *doc, qint64 offset, XrefTail *tail, QString *why)
+{
+    const QByteArray &bytes = doc->bytes;
+    if (offset < 0 || offset >= bytes.size()) {
+        fail(why, QStringLiteral("a cross reference offset lies outside the PDF"));
+        return false;
+    }
+    const int i = skipWhite(bytes, int(offset));
+    if (bytes.mid(i, 4) == "xref") {
+        return readClassicXref(doc, i, tail, why);
+    }
+    return readXrefStream(doc, int(offset), tail, why);
+}
+
+bool parseDocument(const QByteArray &pdf, PdfDocument *doc, QString *why)
+{
+    doc->bytes = pdf;
+
+    const int startxrefAt = int(pdf.lastIndexOf("startxref"));
+    if (startxrefAt < 0) {
+        fail(why, QStringLiteral("the PDF has no startxref"));
+        return false;
+    }
+    const QString tailText = QString::fromLatin1(pdf.mid(startxrefAt + 9, 64)).simplified();
+    bool ok = false;
+    const qint64 offset = tailText.section(QLatin1Char(' '), 0, 0).toLongLong(&ok);
+    if (!ok) {
+        fail(why, QStringLiteral("the startxref offset is not a number"));
+        return false;
+    }
+    doc->newestXrefOffset = offset;
+
+    qint64 current = offset;
+    QSet<qint64> seen;
+    for (int guard = 0; guard < 64; ++guard) {
+        if (current <= 0 || current >= pdf.size() || seen.contains(current)) {
+            break;
+        }
+        seen.insert(current);
+        XrefTail tail;
+        if (!readXrefSection(doc, current, &tail, why)) {
+            return false;
+        }
+        if (!doc->encrypted && tail.encrypted) {
+            doc->encrypted = true;
+        }
+        if (doc->rootNumber < 0 && tail.hasRoot) {
+            doc->rootNumber = tail.root;
+            doc->rootGeneration = tail.rootGeneration;
+        }
+        if (!doc->hasInfo && tail.hasInfo) {
+            doc->hasInfo = true;
+            doc->infoNumber = tail.infoNumber;
+            doc->infoGeneration = tail.infoGeneration;
+        }
+        if (!doc->hasId && tail.hasId) {
+            doc->hasId = true;
+            doc->id = tail.id;
+        }
+        if (tail.size > doc->size) {
+            doc->size = int(tail.size);
+        }
+        if (tail.xrefStm >= 0 && !seen.contains(tail.xrefStm)) {
+            seen.insert(tail.xrefStm);
+            XrefTail hybrid;
+            if (!readXrefSection(doc, tail.xrefStm, &hybrid, why)) {
+                return false;
+            }
+            if (hybrid.encrypted) {
+                doc->encrypted = true;
+            }
+            if (hybrid.size > doc->size) {
+                doc->size = int(hybrid.size);
+            }
+        }
+        if (!tail.hasPrev) {
+            break;
+        }
+        current = tail.prev;
+    }
+
+    /// /Encrypt is checked before anything is decoded: an encrypted file's object streams look
+    /// like garbage, and a precise refusal beats a corrupt export.
+    if (doc->encrypted) {
+        fail(why, QStringLiteral("the PDF is encrypted, so its pages cannot be read and the "
+                                 "notebook cannot be overlaid on it"));
+        return false;
+    }
+    if (doc->xref.isEmpty()) {
+        fail(why, QStringLiteral("no cross reference entries were found in the PDF"));
+        return false;
+    }
+    if (doc->rootNumber < 0) {
+        fail(why, QStringLiteral("the trailer has no /Root"));
+        return false;
+    }
+    for (auto it = doc->xref.constBegin(); it != doc->xref.constEnd(); ++it) {
+        if (it.key() + 1 > doc->size) {
+            doc->size = it.key() + 1;
+        }
+    }
+    return true;
+}
+
+bool objectByNumber(PdfDocument *doc, int number, QByteArray *body, QString *why);
+
+QByteArray objectStreamData(PdfDocument *doc, int objectStreamNumber, QString *why)
+{
+    if (doc->objectStreams.contains(objectStreamNumber)) {
+        return doc->objectStreams.value(objectStreamNumber).data;
+    }
+    QByteArray body;
+    if (!objectByNumber(doc, objectStreamNumber, &body, why)) {
+        return QByteArray();
+    }
+    const int dictStart = skipWhite(body, 0);
+    const int dictEnd = dictEndIndex(body, dictStart);
+    if (dictEnd < 0) {
+        fail(why, QStringLiteral("object %1 is not an object stream").arg(objectStreamNumber));
+        return QByteArray();
+    }
+    const int afterDict = skipWhite(body, dictEnd);
+    if (body.mid(afterDict, 6) != "stream") {
+        fail(why, QStringLiteral("object %1 is not a stream, so its objects cannot be read")
+                      .arg(objectStreamNumber));
+        return QByteArray();
+    }
+
+    /// \a body starts at the dictionary already (objectBodyAt stripped the "N 0 obj" header),
+    /// so the stream is sliced here rather than through streamAt(), which expects a header.
+    int dataStart = afterDict + 6;
+    if (dataStart < body.size() && body.at(dataStart) == '\r') {
+        ++dataStart;
+    }
+    if (dataStart < body.size() && body.at(dataStart) == '\n') {
+        ++dataStart;
+    }
+    int dataEnd = -1;
+    qint64 length = -1;
+    if (dictIntValue(body, dictStart, dictEnd, "Length", &length)
+        && length >= 0 && dataStart + length <= body.size()) {
+        dataEnd = int(dataStart + length);
+    }
+    if (dataEnd < 0) {
+        dataEnd = int(body.indexOf("endstream", dataStart));
+        if (dataEnd < 0) {
+            fail(why, QStringLiteral("object stream %1 has no endstream").arg(objectStreamNumber));
+            return QByteArray();
+        }
+        if (dataEnd > dataStart && body.at(dataEnd - 1) == '\n') {
+            --dataEnd;
+        }
+        if (dataEnd > dataStart && body.at(dataEnd - 1) == '\r') {
+            --dataEnd;
+        }
+    }
+
+    const StreamSlice slice{dictStart, dictEnd, body.mid(dataStart, dataEnd - dataStart)};
+    QByteArray decoded;
+    if (!decodeStream(body, slice.dictStart, slice.dictEnd, slice.raw, &decoded, why)) {
+        return QByteArray();
+    }
+
+    ObjectStream stream;
+    stream.data = decoded;
+    qint64 first = 0;
+    qint64 count = 0;
+    dictIntValue(body, slice.dictStart, slice.dictEnd, "First", &first);
+    dictIntValue(body, slice.dictStart, slice.dictEnd, "N", &count);
+    stream.first = int(first);
+    if (stream.first < 0 || stream.first > decoded.size() || count < 0) {
+        fail(why, QStringLiteral("object stream %1 has no usable /First and /N")
+                      .arg(objectStreamNumber));
+        return QByteArray();
+    }
+    int i = 0;
+    for (qint64 k = 0; k < count; ++k) {
+        qint64 objectNumber = 0;
+        qint64 relative = 0;
+        if (!readInt(decoded, &i, &objectNumber) || !readInt(decoded, &i, &relative)) {
+            fail(why, QStringLiteral("object stream %1 has a truncated header")
+                          .arg(objectStreamNumber));
+            return QByteArray();
+        }
+        if (i > stream.first) {
+            fail(why, QStringLiteral("object stream %1 declares /First inside its own header")
+                          .arg(objectStreamNumber));
+            return QByteArray();
+        }
+        stream.numbers.append(int(objectNumber));
+        stream.offsets.append(int(relative));
+    }
+    doc->objectStreams.insert(objectStreamNumber, stream);
+    return stream.data;
+}
+
+bool objectByNumber(PdfDocument *doc, int number, QByteArray *body, QString *why)
+{
+    if (doc->cache.contains(number)) {
+        *body = doc->cache.value(number);
+        return true;
+    }
+    const XrefEntry entry = doc->xref.value(number, XrefEntry{});
+    if (entry.type == 0) {
+        fail(why, QStringLiteral("object %1 is missing from the cross reference").arg(number));
+        return false;
+    }
+    if (doc->resolving.contains(number)) {
+        fail(why, QStringLiteral("the PDF's objects form a reference cycle at object %1").arg(number));
+        return false;
+    }
+    doc->resolving.insert(number);
+
+    QByteArray result;
+    if (entry.type == 1) {
+        if (!objectBodyAt(doc->bytes, entry.first, &result)) {
+            fail(why, QStringLiteral("object %1 (at byte %2) could not be read")
+                          .arg(number).arg(entry.first));
+            doc->resolving.remove(number);
+            return false;
+        }
+    } else if (entry.type == 2) {
+        const QByteArray data = objectStreamData(doc, int(entry.first), why);
+        if (data.isNull()) {
+            doc->resolving.remove(number);
+            return false;
+        }
+        const ObjectStream &stream = doc->objectStreams.value(int(entry.first));
+        int slot = entry.second;
+        if (slot < 0 || slot >= stream.numbers.size() || stream.numbers.at(slot) != number) {
+            slot = stream.numbers.indexOf(number);
+        }
+        if (slot < 0) {
+            fail(why, QStringLiteral("object %1 is not inside object stream %2")
+                          .arg(number).arg(entry.first));
+            doc->resolving.remove(number);
+            return false;
+        }
+        const int from = stream.first + stream.offsets.at(slot);
+        const int to = slot + 1 < stream.offsets.size()
+            ? stream.first + stream.offsets.at(slot + 1)
+            : data.size();
+        if (from < 0 || to > data.size() || to < from) {
+            fail(why, QStringLiteral("object %1 inside object stream %2 has a bad offset")
+                          .arg(number).arg(entry.first));
+            doc->resolving.remove(number);
+            return false;
+        }
+        result = data.mid(from, to - from);
+    } else {
+        fail(why, QStringLiteral("object %1 has an unknown cross reference type").arg(number));
+        doc->resolving.remove(number);
+        return false;
+    }
+
+    doc->cache.insert(number, result);
+    doc->resolving.remove(number);
+    *body = result;
+    return true;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Pages and inheritance.
+// ---------------------------------------------------------------------------------------------
+
+struct PageEntry {
+    int number = -1;
+    int generation = 0;
+    QList<int> ancestors; ///< parent, grandparent, ... for /MediaBox, /Rotate and /Resources
+};
+
+bool collectPages(PdfDocument *doc, QList<PageEntry> *pages, QString *why)
+{
+    QByteArray catalog;
+    if (!objectByNumber(doc, doc->rootNumber, &catalog, why)) {
+        return false;
+    }
+    const int catalogStart = skipWhite(catalog, 0);
+    const int catalogEnd = dictEndIndex(catalog, catalogStart);
+    int pagesNumber = -1;
+    int pagesGeneration = 0;
+    if (catalogEnd < 0
+        || !dictRefValue(catalog, catalogStart, catalogEnd, "Pages", &pagesNumber,
+                         &pagesGeneration)) {
+        fail(why, QStringLiteral("the catalog has no /Pages"));
+        return false;
+    }
+
+    QList<QPair<int, QList<int>>> pending;
+    pending.append(QPair<int, QList<int>>(pagesNumber, QList<int>()));
+    QSet<int> visitedInternal;
+    for (int guard = 0; !pending.isEmpty() && guard < 100000; ++guard) {
+        const QPair<int, QList<int>> node = pending.takeFirst();
+        QByteArray body;
+        if (!objectByNumber(doc, node.first, &body, why)) {
+            return false;
+        }
+        const int dictStart = skipWhite(body, 0);
+        const int dictEnd = dictEndIndex(body, dictStart);
+        if (dictEnd < 0) {
+            fail(why, QStringLiteral("object %1 in the page tree is not a dictionary")
+                          .arg(node.first));
+            return false;
+        }
+        if (dictValueAt(body, dictStart, dictEnd, "Kids") >= 0) {
+            if (visitedInternal.contains(node.first)) {
+                continue;
+            }
+            visitedInternal.insert(node.first);
+            QList<QPair<int, int>> kids = dictRefs(body, dictStart, dictEnd, "Kids");
+            if (kids.isEmpty()) {
+                fail(why, QStringLiteral("a /Pages node in the page tree has no readable /Kids"));
+                return false;
+            }
+            QList<int> lineage = node.second;
+            lineage.prepend(node.first);
+            for (const QPair<int, int> &kid : kids) {
+                pending.append(QPair<int, QList<int>>(kid.first, lineage));
+            }
+            continue;
+        }
+        PageEntry page;
+        page.number = node.first;
+        page.ancestors = node.second;
+        page.generation = 0;
+        pages->append(page);
+    }
+
+    if (pages->isEmpty()) {
+        fail(why, QStringLiteral("no pages were found in the page tree"));
+        return false;
+    }
+    return true;
+}
+
+/// The value of \a key on the page or, failing that, on its nearest ancestor that has it.
+bool inheritedValue(PdfDocument *doc, const PageEntry &page, const char *key, QByteArray *body,
+                    int *dictStart, int *dictEnd, int *valueAt, QString *why)
+{
+    QList<int> candidates;
+    candidates.append(page.number);
+    candidates += page.ancestors;
+    for (int number : candidates) {
+        QByteArray candidate;
+        if (!objectByNumber(doc, number, &candidate, why)) {
+            return false;
+        }
+        const int start = skipWhite(candidate, 0);
+        const int end = dictEndIndex(candidate, start);
+        if (end < 0) {
+            continue;
+        }
+        const int value = dictValueAt(candidate, start, end, key);
+        if (value < 0) {
+            continue;
+        }
+        *body = candidate;
+        *dictStart = start;
+        *dictEnd = end;
+        *valueAt = value;
+        return true;
+    }
+    return false;
+}
+
+bool effectiveRect(PdfDocument *doc, const PageEntry &page, QString *why,
+                   double *x0, double *y0, double *x1, double *y1)
+{
+    QByteArray body;
+    int dictStart = 0;
+    int dictEnd = 0;
+    int value = 0;
+    if (!inheritedValue(doc, page, "MediaBox", &body, &dictStart, &dictEnd, &value, why)) {
+        fail(why, QStringLiteral("page %1 has no /MediaBox, not even an inherited one")
+                      .arg(page.number));
+        return false;
+    }
+    int i = skipWhite(body, value);
+    if (i >= body.size() || body.at(i) != '[') {
+        fail(why, QStringLiteral("page %1 has an unreadable /MediaBox").arg(page.number));
+        return false;
+    }
+    const int close = int(body.indexOf(']', i));
+    if (close < 0) {
+        fail(why, QStringLiteral("page %1 has an unreadable /MediaBox").arg(page.number));
+        return false;
+    }
+    const QStringList parts = QString::fromLatin1(body.mid(i + 1, close - i - 1))
+                                  .simplified().split(QLatin1Char(' '));
+    if (parts.size() != 4) {
+        fail(why, QStringLiteral("page %1 has a /MediaBox that is not a rectangle")
+                      .arg(page.number));
+        return false;
+    }
+    *x0 = parts.at(0).toDouble();
+    *y0 = parts.at(1).toDouble();
+    *x1 = parts.at(2).toDouble();
+    *y1 = parts.at(3).toDouble();
+    if (!(x1 > x0) || !(y1 > y0)) {
+        fail(why, QStringLiteral("page %1 has an empty or inverted /MediaBox").arg(page.number));
+        return false;
+    }
+    return true;
+}
+
+bool effectiveRotation(PdfDocument *doc, const PageEntry &page, QString *why, int *rotation)
+{
+    *rotation = 0;
+    QByteArray body;
+    int dictStart = 0;
+    int dictEnd = 0;
+    int value = 0;
+    if (!inheritedValue(doc, page, "Rotate", &body, &dictStart, &dictEnd, &value, why)) {
+        return true;
+    }
+    int i = value;
+    qint64 raw = 0;
+    if (!readInt(body, &i, &raw)) {
+        fail(why, QStringLiteral("page %1 has an unreadable /Rotate").arg(page.number));
+        return false;
+    }
+    int normalized = int(((raw % 360) + 360) % 360);
+    if (normalized % 90 != 0) {
+        fail(why, QStringLiteral("page %1 has /Rotate %2, which is not a multiple of 90")
+                      .arg(page.number).arg(raw));
+        return false;
+    }
+    *rotation = normalized;
+    return true;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Writing.
+// ---------------------------------------------------------------------------------------------
 
 /// FlateDecode wants raw zlib; qCompress prepends a four byte length that PDF does not expect.
 QByteArray deflate(const QByteArray &data)
@@ -125,98 +1367,299 @@ QByteArray imageObject(int width, int height, const QByteArray &colorSpace, cons
     return object;
 }
 
-/// Reads \a key from a page dictionary as a rectangle of numbers.
-bool mediaBox(const QByteArray &page, double *x0, double *y0, double *x1, double *y1)
+struct WrittenObject {
+    int number = 0;
+    int generation = 0;
+    QByteArray body;
+};
+
+/// Inserts "/pdfioInk N 0 R" into the /XObject sub-dictionary of \a resources, creating the
+/// sub-dictionary if needed and never adding a duplicate /XObject key (a second key would hide
+/// the page's original images from every reader that keeps the last one).
+bool mergeInkXObject(PdfDocument *doc, const QByteArray &resources, int imageNumber,
+                     int *nextObject, QList<WrittenObject> *appended, QByteArray *merged,
+                     QString *why)
 {
-    const int at = page.indexOf("/MediaBox");
-    if (at < 0) {
+    const int dictStart = skipWhite(resources, 0);
+    const int dictEnd = dictEndIndex(resources, dictStart);
+    if (dictEnd < 0) {
+        fail(why, QStringLiteral("a page's /Resources is not a dictionary"));
         return false;
     }
-    const int open = page.indexOf('[', at);
-    const int close = page.indexOf(']', open);
-    if (open < 0 || close < 0) {
-        return false;
+    const QByteArray entry = "/pdfioInk " + QByteArray::number(imageNumber) + " 0 R";
+    const int at = dictValueAt(resources, dictStart, dictEnd, "XObject");
+    if (at < 0) {
+        *merged = resources.left(dictStart + 2) + " /XObject << " + entry + " >>"
+                  + resources.mid(dictStart + 2);
+        return true;
     }
 
-    const QStringList parts = QString::fromLatin1(page.mid(open + 1, close - open - 1))
-                                  .simplified().split(QLatin1Char(' '));
-    if (parts.size() != 4) {
+    const int value = skipWhite(resources, at);
+    if (resources.mid(value, 2) == "<<") {
+        const int xEnd = dictEndIndex(resources, value);
+        if (xEnd < 0) {
+            fail(why, QStringLiteral("a page's /XObject is not a readable dictionary"));
+            return false;
+        }
+        *merged = resources.left(value + 2) + " " + entry + " " + resources.mid(value + 2);
+        return true;
+    }
+
+    int number = 0;
+    int generation = 0;
+    if (!dictRefValue(resources, dictStart, dictEnd, "XObject", &number, &generation)) {
+        fail(why, QStringLiteral("a page's /XObject is neither a dictionary nor a reference"));
         return false;
     }
-    *x0 = parts.at(0).toDouble();
-    *y0 = parts.at(1).toDouble();
-    *x1 = parts.at(2).toDouble();
-    *y1 = parts.at(3).toDouble();
+    QByteArray sub;
+    if (!objectByNumber(doc, number, &sub, why)) {
+        return false;
+    }
+    const int subStart = skipWhite(sub, 0);
+    const int subEnd = dictEndIndex(sub, subStart);
+    if (subEnd < 0) {
+        fail(why, QStringLiteral("the object a page's /XObject points at is not a dictionary"));
+        return false;
+    }
+    QByteArray replacement = sub.left(subStart + 2) + " " + entry + " " + sub.mid(subStart + 2);
+    const int newNumber = (*nextObject)++;
+    appended->append(WrittenObject{newNumber, 0, replacement});
+
+    int i = skipWhite(resources, at);
+    qint64 refNumber = 0;
+    qint64 refGeneration = 0;
+    if (!readInt(resources, &i, &refNumber) || !readInt(resources, &i, &refGeneration)) {
+        fail(why, QStringLiteral("a page's /XObject reference is unreadable"));
+        return false;
+    }
+    i = skipWhite(resources, i);
+    if (i >= resources.size() || resources.at(i) != 'R') {
+        fail(why, QStringLiteral("a page's /XObject reference is unreadable"));
+        return false;
+    }
+    *merged = resources.left(at) + " " + QByteArray::number(newNumber) + " 0 R "
+              + resources.mid(i + 1);
     return true;
 }
 
-int rotationOf(const QByteArray &page)
+/// Slice of the /Resources dictionary of a page, wherever it actually lives.
+struct ResourcesSlice {
+    QByteArray dict;
+    bool inlineInPage = false; ///< true when the dictionary is inside the page object itself
+    int valueAt = -1;          ///< index of the /Resources value in the page body, when inline
+    int valueEnd = -1;
+};
+
+bool findResources(PdfDocument *doc, const PageEntry &page, const QByteArray &pageBody,
+                   ResourcesSlice *out, QString *why)
 {
-    const int at = page.indexOf("/Rotate");
-    if (at < 0) {
-        return 0;
+    const int pageStart = skipWhite(pageBody, 0);
+    const int pageEnd = dictEndIndex(pageBody, pageStart);
+    if (pageEnd < 0) {
+        fail(why, QStringLiteral("page %1 is not a dictionary").arg(page.number));
+        return false;
     }
-    const QString tail = QString::fromLatin1(page.mid(at + 7, 16)).simplified();
-    return tail.section(QLatin1Char(' '), 0, 0).toInt();
+
+    QList<int> candidates;
+    candidates.append(page.number);
+    candidates += page.ancestors;
+    for (int candidate : candidates) {
+        const QByteArray body = candidate == page.number ? pageBody : QByteArray();
+        QByteArray owner = body;
+        if (owner.isEmpty()) {
+            if (!objectByNumber(doc, candidate, &owner, why)) {
+                return false;
+            }
+        }
+        const int start = skipWhite(owner, 0);
+        const int end = dictEndIndex(owner, start);
+        if (end < 0) {
+            continue;
+        }
+        const int value = dictValueAt(owner, start, end, "Resources");
+        if (value < 0) {
+            continue;
+        }
+        const int p = skipWhite(owner, value);
+        if (owner.mid(p, 2) == "<<") {
+            const int e = dictEndIndex(owner, p);
+            if (e < 0) {
+                fail(why, QStringLiteral("page %1 has an unreadable /Resources")
+                              .arg(page.number));
+                return false;
+            }
+            out->dict = owner.mid(p, e - p);
+            out->inlineInPage = candidate == page.number;
+            if (out->inlineInPage) {
+                out->valueAt = p;
+                out->valueEnd = e;
+            }
+            return true;
+        }
+        int number = 0;
+        int generation = 0;
+        if (!dictRefValue(owner, start, end, "Resources", &number, &generation)) {
+            fail(why, QStringLiteral("page %1 has a /Resources that is neither a dictionary nor "
+                                     "a reference")
+                          .arg(page.number));
+            return false;
+        }
+        QByteArray resolved;
+        if (!objectByNumber(doc, number, &resolved, why)) {
+            return false;
+        }
+        const int rs = skipWhite(resolved, 0);
+        const int re = dictEndIndex(resolved, rs);
+        if (re < 0) {
+            fail(why, QStringLiteral("the /Resources object %1 of page %2 is not a dictionary")
+                          .arg(number).arg(page.number));
+            return false;
+        }
+        out->dict = resolved.mid(rs, re - rs);
+        out->inlineInPage = false;
+        return true;
+    }
+
+    /// No /Resources anywhere: a page can legitimately have none. Synthesize one.
+    out->dict = "<< >>";
+    out->inlineInPage = false;
+    return true;
+}
+
+/// Replaces the object reference that starts at \a valueAt with \a replacement.
+bool replaceRef(const QByteArray &body, int valueAt, const QByteArray &replacement, QByteArray *out,
+                QString *why)
+{
+    int i = valueAt;
+    qint64 number = 0;
+    qint64 generation = 0;
+    if (!readInt(body, &i, &number) || !readInt(body, &i, &generation)) {
+        fail(why, QStringLiteral("an indirect reference in a page dictionary is unreadable"));
+        return false;
+    }
+    i = skipWhite(body, i);
+    if (i >= body.size() || body.at(i) != 'R') {
+        fail(why, QStringLiteral("an indirect reference in a page dictionary is unreadable"));
+        return false;
+    }
+    *out = body.left(valueAt) + " " + replacement + body.mid(i + 1);
+    return true;
+}
+
+/// The page body with the ink content stream appended to /Contents and /pdfioInk added to the
+/// page's (possibly inherited) resources.
+bool preparePage(PdfDocument *doc, const PageEntry &page, int imageNumber, int contentNumber,
+                 int saveContentNumber, int *nextObject, QList<WrittenObject> *appended,
+                 QByteArray *newBody, QString *why)
+{
+    QByteArray body;
+    if (!objectByNumber(doc, page.number, &body, why)) {
+        return false;
+    }
+    int dictStart = skipWhite(body, 0);
+    int dictEnd = dictEndIndex(body, dictStart);
+    if (dictEnd < 0) {
+        fail(why, QStringLiteral("page %1 is not a dictionary").arg(page.number));
+        return false;
+    }
+
+    /// /Contents becomes [save, original..., ink]: the save stream opens the graphics state
+    /// before the page's own content and the ink stream closes it again, so the overlay is not
+    /// subject to a transform or clip the source forgot to restore. A page that legitimately had
+    /// no contents at all gets [save, ink].
+    const int contentsAt = dictValueAt(body, dictStart, dictEnd, "Contents");
+    const QByteArray contentRef = QByteArray::number(contentNumber) + " 0 R";
+    const QByteArray saveRef = QByteArray::number(saveContentNumber) + " 0 R";
+    if (contentsAt < 0) {
+        body = body.left(dictEnd - 2) + " /Contents [ " + saveRef + " " + contentRef + " ] "
+               + body.mid(dictEnd - 2);
+    } else {
+        const int p = skipWhite(body, contentsAt);
+        if (p < body.size() && body.at(p) == '[') {
+            body = body.left(p + 1) + " " + saveRef + " " + body.mid(p + 1);
+            const int close = int(body.indexOf(']', p));
+            if (close < 0) {
+                fail(why, QStringLiteral("page %1 has an unreadable /Contents array")
+                              .arg(page.number));
+                return false;
+            }
+            body = body.left(close) + " " + contentRef + " " + body.mid(close);
+        } else {
+            int number = 0;
+            int generation = 0;
+            if (!dictRefValue(body, dictStart, dictEnd, "Contents", &number, &generation)) {
+                fail(why, QStringLiteral("page %1 has a /Contents that is neither an array nor a "
+                                         "reference")
+                              .arg(page.number));
+                return false;
+            }
+            QByteArray wrapped;
+            if (!replaceRef(body, contentsAt,
+                            "[" + saveRef + " " + QByteArray::number(number) + " "
+                                + QByteArray::number(generation) + " R " + contentRef + "]",
+                            &wrapped, why)) {
+                return false;
+            }
+            body = wrapped;
+        }
+    }
+
+    dictStart = skipWhite(body, 0);
+    dictEnd = dictEndIndex(body, dictStart);
+
+    ResourcesSlice resources;
+    if (!findResources(doc, page, body, &resources, why)) {
+        return false;
+    }
+    QByteArray merged;
+    if (!mergeInkXObject(doc, resources.dict, imageNumber, nextObject, appended, &merged, why)) {
+        return false;
+    }
+
+    if (resources.inlineInPage) {
+        body = body.left(resources.valueAt) + merged + body.mid(resources.valueEnd);
+    } else {
+        const int newNumber = (*nextObject)++;
+        appended->append(WrittenObject{newNumber, 0, merged});
+        const QByteArray reference = QByteArray::number(newNumber) + " 0 R";
+
+        dictStart = skipWhite(body, 0);
+        dictEnd = dictEndIndex(body, dictStart);
+        const int own = dictValueAt(body, dictStart, dictEnd, "Resources");
+        if (own >= 0) {
+            QByteArray repointed;
+            if (!replaceRef(body, own, reference, &repointed, why)) {
+                return false;
+            }
+            body = repointed;
+        } else {
+            dictEnd = dictEndIndex(body, dictStart);
+            body = body.left(dictEnd - 2) + " /Resources " + reference + " " + body.mid(dictEnd - 2);
+        }
+    }
+
+    *newBody = body;
+    return true;
 }
 
 } // namespace
 
 QList<int> PdfExporter::pageObjectNumbers(const QByteArray &pdf, QString *why)
 {
-    if (pdf.contains("/Type /ObjStm") || pdf.contains("/Type/ObjStm")) {
-        fail(why, QStringLiteral("this PDF keeps its objects in object streams, which the "
-                                 "exporter cannot rewrite yet"));
+    PdfDocument doc;
+    if (!parseDocument(pdf, &doc, why)) {
         return {};
     }
-
-    const QHash<int, QByteArray> objects = splitObjects(pdf);
-    if (objects.isEmpty()) {
-        fail(why, QStringLiteral("no plain objects found in the PDF"));
+    QList<PageEntry> pages;
+    if (!collectPages(&doc, &pages, why)) {
         return {};
     }
-
-    /// From the trailer to the catalog to the page tree, rather than trusting file order.
-    const int trailerAt = pdf.lastIndexOf("trailer");
-    if (trailerAt < 0) {
-        fail(why, QStringLiteral("the PDF has no trailer"));
-        return {};
+    QList<int> numbers;
+    numbers.reserve(pages.size());
+    for (const PageEntry &page : pages) {
+        numbers.append(page.number);
     }
-    const QString trailer = QString::fromLatin1(pdf.mid(trailerAt, 400));
-    const QRegularExpression rootRe(QStringLiteral("/Root\\s+(\\d+)\\s+0\\s+R"));
-    const QRegularExpressionMatch rootMatch = rootRe.match(trailer);
-    if (!rootMatch.hasMatch()) {
-        fail(why, QStringLiteral("the trailer has no /Root"));
-        return {};
-    }
-
-    const QByteArray catalog = objects.value(rootMatch.captured(1).toInt());
-    const QRegularExpression pagesRe(QStringLiteral("/Pages\\s+(\\d+)\\s+0\\s+R"));
-    const QRegularExpressionMatch pagesMatch = pagesRe.match(QString::fromLatin1(catalog));
-    if (!pagesMatch.hasMatch()) {
-        fail(why, QStringLiteral("the catalog has no /Pages"));
-        return {};
-    }
-
-    QList<int> pages;
-    QList<int> pending{ pagesMatch.captured(1).toInt() };
-    while (!pending.isEmpty()) {
-        const int number = pending.takeFirst();
-        const QByteArray body = objects.value(number);
-        /// Not /Pages: a naive test for /Page also matches the page tree node, which would be
-        /// listed as a page and its children never visited.
-        static const QRegularExpression pageRe(QStringLiteral("/Type\\s*/Page(?![s])"));
-        if (pageRe.match(QString::fromLatin1(body)).hasMatch()) {
-            pages.append(number);
-            continue;
-        }
-        pending = kidsOf(objects, number) + pending;
-    }
-
-    if (pages.isEmpty()) {
-        fail(why, QStringLiteral("no pages found in the page tree"));
-    }
-    return pages;
+    return numbers;
 }
 
 bool PdfExporter::exportWithInk(const QString &sourcePdf,
@@ -237,35 +1680,18 @@ bool PdfExporter::exportWithInk(const QString &sourcePdf,
     const QByteArray pdf = source.readAll();
     source.close();
 
-    const QList<int> pages = pageObjectNumbers(pdf, why);
-    if (pages.isEmpty()) {
+    PdfDocument doc;
+    if (!parseDocument(pdf, &doc, why)) {
+        return false;
+    }
+    QList<PageEntry> pages;
+    if (!collectPages(&doc, &pages, why)) {
         return false;
     }
 
-    const QHash<int, QByteArray> objects = splitObjects(pdf);
-
-    /// /Size from the trailer, so appended objects start above everything that exists.
-    const QString trailer = QString::fromLatin1(pdf.mid(pdf.lastIndexOf("trailer"), 400));
-    const QRegularExpression sizeRe(QStringLiteral("/Size\\s+(\\d+)"));
-    const QRegularExpressionMatch sizeMatch = sizeRe.match(trailer);
-    int nextObject = sizeMatch.hasMatch() ? sizeMatch.captured(1).toInt() : objects.size() + 1;
-
-    const QRegularExpression rootRe(QStringLiteral("/Root\\s+(\\d+)\\s+0\\s+R"));
-    const QRegularExpressionMatch rootMatch = rootRe.match(trailer);
-    if (!rootMatch.hasMatch()) {
-        fail(why, QStringLiteral("the trailer has no /Root"));
-        return false;
-    }
-    const int rootObject = rootMatch.captured(1).toInt();
-
-    /// Where the previous xref is, so the new trailer can chain to it.
-    int prevXrefOffset = 0;
-    {
-        const int startxrefAt = pdf.lastIndexOf("startxref");
-        if (startxrefAt >= 0) {
-            const QString tail = QString::fromLatin1(pdf.mid(startxrefAt + 9, 32)).simplified();
-            prevXrefOffset = tail.section(QLatin1Char(' '), 0, 0).toInt();
-        }
+    int nextObject = qMax(1, doc.size);
+    for (auto it = doc.xref.constBegin(); it != doc.xref.constEnd(); ++it) {
+        nextObject = qMax(nextObject, it.key() + 1);
     }
 
     QByteArray out = pdf;
@@ -273,35 +1699,39 @@ bool PdfExporter::exportWithInk(const QString &sourcePdf,
         out += NL;
     }
 
-    QHash<int, QByteArray> replacements;   // object number -> new body
-    QList<QPair<int, QByteArray>> appended; // new object number -> body, in writable order
+    QList<WrittenObject> replacements;
+    QList<WrittenObject> appended;
+    QSet<int> rewritten;
 
     for (int i = 0; i < pages.size() && i < manifest.pages.size(); ++i) {
-        const int pageObject = pages.at(i);
-        const QByteArray page = objects.value(pageObject);
-        if (page.isEmpty()) {
-            fail(why, QStringLiteral("page %1 is missing from the file").arg(i + 1));
-            return false;
-        }
-
-        const PdfPageRecord &record = manifest.pages.at(i);
+        const PageEntry &page = pages.at(i);
         QHash<int, QImage>::const_iterator found = ink.constFind(i);
         if (found == ink.constEnd() || found->isNull()) {
             continue;
         }
+        if (rewritten.contains(page.number)) {
+            fail(why, QStringLiteral("notebook pages %1 and %2 both point at PDF page object %3, "
+                                     "so an overlay cannot be attached to each separately")
+                          .arg(i).arg(i + 1).arg(page.number));
+            return false;
+        }
+        rewritten.insert(page.number);
 
         double x0 = 0;
         double y0 = 0;
         double x1 = 0;
         double y1 = 0;
-        if (!mediaBox(page, &x0, &y0, &x1, &y1)) {
-            fail(why, QStringLiteral("page %1 has no usable MediaBox").arg(i + 1));
+        if (!effectiveRect(&doc, page, why, &x0, &y0, &x1, &y1)) {
+            return false;
+        }
+        int rotation = 0;
+        if (!effectiveRotation(&doc, page, why, &rotation)) {
             return false;
         }
 
         /// The image is stored the way the viewer will rotate it, so it has to be turned back
         /// into the page's own coordinates first.
-        QImage placed = inkInPageSpace(*found, rotationOf(page));
+        const QImage placed = inkInPageSpace(*found, rotation);
         if (placed.isNull()) {
             fail(why, QStringLiteral("page %1 produced no image").arg(i + 1));
             return false;
@@ -309,89 +1739,49 @@ bool PdfExporter::exportWithInk(const QString &sourcePdf,
 
         const int maskNumber = nextObject++;
         const int imageNumber = nextObject++;
-        appended.append({ maskNumber,
-                          imageObject(placed.width(), placed.height(), "DeviceGray",
-                                      deflate(alphaSamples(placed)), false, 0) });
-        appended.append({ imageNumber,
-                          imageObject(placed.width(), placed.height(), "DeviceRGB",
-                                      deflate(rgbSamples(placed)), true, maskNumber) });
+        appended.append(WrittenObject{maskNumber, 0,
+                                      imageObject(placed.width(), placed.height(), "DeviceGray",
+                                                  deflate(alphaSamples(placed)), false, 0)});
+        appended.append(WrittenObject{imageNumber, 0,
+                                      imageObject(placed.width(), placed.height(), "DeviceRGB",
+                                                  deflate(rgbSamples(placed)), true, maskNumber)});
+
+        /// Appended content inherits the graphics state the page's own stream left behind, and
+        /// real writers do not always restore it: Chromium/Skia ends its page stream with a
+        /// scaled, y-flipped CTM applied outside any q. A one byte "q" stream runs *before* the
+        /// page content and saves the page's default user space; the ink stream then pops back to
+        /// it with Q, so the overlay lands where the user drew it no matter what the source left.
+        const int saveContentNumber = nextObject++;
+        const QByteArray saveContent = "q" + NL;
+        appended.append(WrittenObject{saveContentNumber, 0,
+                                      "<< /Length " + QByteArray::number(saveContent.size())
+                                          + " >>" + NL + "stream" + NL + saveContent + "endstream"});
 
         /// Draw the ink over the page, in the page's own user space.
         const double widthPt = x1 - x0;
         const double heightPt = y1 - y0;
-        /// "q " and not "q": without the separator the parser reads "q595.0000" as one token.
-        QByteArray content = "q " + QByteArray::number(widthPt, 'f', 4) + " 0 0 "
-                             + QByteArray::number(heightPt, 'f', 4) + " "
-                             + QByteArray::number(x0, 'f', 4) + " "
-                             + QByteArray::number(y0, 'f', 4) + " cm /pdfioInk Do Q" + NL;
+        /// "Q " first, to leave whatever state the page content left. "q " and not "q": without
+        /// the separator a parser reads "q595.0000" as one token.
+        const QByteArray content = "Q q " + QByteArray::number(widthPt, 'f', 4) + " 0 0 "
+                                   + QByteArray::number(heightPt, 'f', 4) + " "
+                                   + QByteArray::number(x0, 'f', 4) + " "
+                                   + QByteArray::number(y0, 'f', 4)
+                                   + " cm /pdfioInk Do Q" + NL;
 
         const int contentNumber = nextObject++;
-        appended.append({ contentNumber,
-                          "<< /Length " + QByteArray::number(content.size()) + " >>" + NL
-                              + "stream" + NL + content + "endstream" });
+        appended.append(WrittenObject{contentNumber, 0,
+                                      "<< /Length " + QByteArray::number(content.size()) + " >>"
+                                          + NL + "stream" + NL + content + "endstream"});
 
-        /// /Contents becomes the original plus ours, so the ink lands on top.
-        QByteArray replaced = page;
-        const int contentsAt = replaced.indexOf("/Contents");
-        if (contentsAt < 0) {
-            fail(why, QStringLiteral("page %1 has no /Contents").arg(i + 1));
+        QByteArray newBody;
+        if (!preparePage(&doc, page, imageNumber, contentNumber, saveContentNumber, &nextObject,
+                         &appended, &newBody, why)) {
             return false;
         }
-
-        const int valueStart = contentsAt + 9;
-        const QString tail = QString::fromLatin1(replaced.mid(valueStart, 64));
-
-        /// Either an array of references or a single one, matched against the tail rather than
-        /// walked byte by byte. The byte walk this replaced treated a space as part of the value,
-        /// ran past "4 0 R" and onto the next dictionary key, and produced a page object that
-        /// Poppler rejected as a dictionary key that is not a name.
-        static const QRegularExpression arrayRe(QStringLiteral("^(\\s*\\[[^\\]]*\\])"));
-        static const QRegularExpression refRe(QStringLiteral("^(\\s*\\d+\\s+0\\s+R)"));
-
-        const QRegularExpressionMatch arrayMatch = arrayRe.match(tail);
-        const QRegularExpressionMatch refMatch = refRe.match(tail);
-        if (!arrayMatch.hasMatch() && !refMatch.hasMatch()) {
-            fail(why, QStringLiteral("page %1 has an unreadable /Contents").arg(i + 1));
-            return false;
-        }
-
-        /// The capture keeps the leading whitespace, so it can be replaced in place.
-        const QByteArray captured = (arrayMatch.hasMatch() ? arrayMatch.captured(1)
-                                                           : refMatch.captured(1)).toLatin1();
-        const QByteArray value = captured.trimmed();
-
-        QByteArray list = value.startsWith('[') ? value.left(value.size() - 1)
-                                                : QByteArray("[") + value;
-        list += " " + QByteArray::number(contentNumber) + " 0 R ]";
-        replaced.replace(valueStart, captured.size(), list);
-
-        /// The drawing operator needs a name in the page's resources.
-        const int resourcesAt = replaced.indexOf("/Resources");
-        if (resourcesAt < 0) {
-            fail(why, QStringLiteral("page %1 has no /Resources").arg(i + 1));
-            return false;
-        }
-        /// Skip the whitespace between the key and its value: "/Resources << ..." is the
-        /// normal spelling and a check at a fixed offset misses it.
-        int resourcesValue = resourcesAt + 10;
-        while (resourcesValue < replaced.size() && replaced.at(resourcesValue) == ' ') {
-            ++resourcesValue;
-        }
-
-        const QByteArray xobjectEntry = "/XObject << /pdfioInk " + QByteArray::number(imageNumber) + " 0 R >> ";
-        if (replaced.mid(resourcesValue, 2) == "<<") {
-            replaced.insert(resourcesValue + 2, xobjectEntry);
-        } else {
-            fail(why, QStringLiteral("page %1 refers to its resources indirectly, which the "
-                                     "exporter does not merge yet").arg(i + 1));
-            return false;
-        }
-
-        Q_UNUSED(record);
-        replacements.insert(pageObject, replaced);
+        replacements.append(WrittenObject{page.number, page.generation, newBody});
     }
 
-    if (appended.isEmpty() && replacements.isEmpty()) {
+    if (replacements.isEmpty() && appended.isEmpty()) {
         /// Nothing to add: the honest answer is a clean copy, not an incremental update with an
         /// empty body.
         QFile copy(outPath);
@@ -403,31 +1793,52 @@ bool PdfExporter::exportWithInk(const QString &sourcePdf,
         return true;
     }
 
-    QList<int> written;
-    QHash<int, int> offsets;
-    for (auto it = replacements.constBegin(); it != replacements.constEnd(); ++it) {
-        offsets.insert(it.key(), out.size());
-        out += QByteArray::number(it.key()) + " 0 obj" + NL + it.value() + NL + "endobj" + NL;
-        written.append(it.key());
+    QHash<int, qint64> offsets;
+    QList<int> numbers;
+    auto writeObject = [&out, &offsets, &numbers](const WrittenObject &object) {
+        offsets.insert(object.number, out.size());
+        numbers.append(object.number);
+        out += QByteArray::number(object.number) + " " + QByteArray::number(object.generation)
+               + " obj" + NL + object.body + NL + "endobj" + NL;
+    };
+    for (const WrittenObject &object : replacements) {
+        writeObject(object);
     }
-    for (const QPair<int, QByteArray> &entry : appended) {
-        offsets.insert(entry.first, out.size());
-        out += QByteArray::number(entry.first) + " 0 obj" + NL + entry.second + NL + "endobj" + NL;
-        written.append(entry.first);
+    for (const WrittenObject &object : appended) {
+        writeObject(object);
     }
 
-    std::sort(written.begin(), written.end());
+    std::sort(numbers.begin(), numbers.end());
+    numbers.erase(std::unique(numbers.begin(), numbers.end()), numbers.end());
 
-    const int xrefAt = out.size();
+    int size = nextObject;
+    for (int number : numbers) {
+        size = qMax(size, number + 1);
+    }
+
+    const qint64 xrefAt = out.size();
     out += "xref" + QByteArray(NL);
-    for (int number : written) {
-        out += QByteArray::number(number) + " 1" + NL;
-        out += QByteArray::number(offsets.value(number)).rightJustified(10, '0') + " 00000 n " + NL;
+    /// The free head entry, then one subsection per written object, in ascending order.
+    out += "0 1" + QByteArray(NL) + "0000000000 65535 f " + QByteArray(NL);
+    for (int number : numbers) {
+        out += QByteArray::number(number) + " 1" + QByteArray(NL);
+        out += QByteArray::number(offsets.value(number)).rightJustified(10, '0') + " 00000 n "
+               + QByteArray(NL);
     }
-    out += "trailer" + QByteArray(NL) + "<< /Size " + QByteArray::number(nextObject)
-           + " /Root " + QByteArray::number(rootObject) + " 0 R /Prev "
-           + QByteArray::number(prevXrefOffset) + " >>" + NL
-           + "startxref" + QByteArray(NL) + QByteArray::number(xrefAt) + NL + "%%EOF" + NL;
+
+    out += "trailer" + QByteArray(NL) + "<< /Size " + QByteArray::number(size)
+           + " /Root " + QByteArray::number(doc.rootNumber) + " "
+           + QByteArray::number(doc.rootGeneration) + " R /Prev "
+           + QByteArray::number(doc.newestXrefOffset);
+    if (doc.hasInfo) {
+        out += " /Info " + QByteArray::number(doc.infoNumber) + " "
+               + QByteArray::number(doc.infoGeneration) + " R";
+    }
+    if (doc.hasId) {
+        out += " /ID " + doc.id;
+    }
+    out += " >>" + QByteArray(NL) + "startxref" + QByteArray(NL) + QByteArray::number(xrefAt)
+           + QByteArray(NL) + "%%EOF" + QByteArray(NL);
 
     QFile target(outPath);
     if (!target.open(QIODevice::WriteOnly | QIODevice::Truncate)) {

@@ -26,6 +26,13 @@
  * The ink is placed in *page* space, so it rotates with the page rather than with the screen,
  * and a MediaBox that does not start at the origin needs no correction.
  *
+ * The reader understands both cross reference forms: the classic xref table and the PDF 1.5
+ * cross reference stream (/Type /XRef), including pages that live inside object streams
+ * (/Type /ObjStm) with FlateDecode and PNG or TIFF predictors -- which is how browsers, Ghostscript
+ * and most LaTeX output store their pages today. A construct it cannot read is refused with a
+ * precise message instead of being written out as a file that only looks right: encrypted files,
+ * stream filters other than FlateDecode, and unreadable page trees are refused, never guessed.
+ *
  * Deliberately pure C++ with no renderer dependency, so the same code runs on desktop and on
  * Android, where there is no Poppler at all.
  */
@@ -43,9 +50,9 @@ public:
                               QString *why = nullptr);
 
     /**
-     * Object numbers of the pages, in order. Exposed for the test: an empty result means the
-     * file keeps its objects in object streams, which this writer does not walk yet, and export
-     * refuses rather than producing a file that only looks right.
+     * Object numbers of the pages, in order. Exposed for the test: it exercises the same reader
+     * the writer uses, so an empty result with a \a why explains what in the structure is not
+     * understood rather than producing a file that only looks right.
      */
     static QList<int> pageObjectNumbers(const QByteArray &pdf, QString *why = nullptr);
 };

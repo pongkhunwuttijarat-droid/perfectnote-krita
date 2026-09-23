@@ -8,12 +8,23 @@
 #include "session/PdfExporter.h"
 #include "session/PdfSession.h"
 
+#include <QElapsedTimer>
+#include <QFile>
 #include <QtTest>
 
 /**
- * The export contract, checked by rendering the result rather than trusting the bytes: the ink
- * has to land where it was drawn, on a plain page, on a rotated page and on a page whose
- * MediaBox does not start at the origin, and the source text has to survive all of it.
+ * The export contract, checked by rendering the result rather than trusting the bytes.
+ *
+ * Three families are covered:
+ *   - a classic PDF 1.4 file with plain page objects (text-fixture.pdf, ex-rotations.pdf),
+ *   - a PDF 1.5 file whose pages live in an object stream behind a cross reference stream
+ *     (ex-objstm-predictor.pdf, hand built to use a PNG predictor, and ex-objstm-*.pdf,
+ *     produced by Ghostscript, a real third party writer),
+ *   - a 50 page mixed size notebook, where untouched pages have to stay byte identical.
+ *
+ * The ink has to land where it was drawn on plain, rotated and offset MediaBox pages, the source
+ * text has to survive all of it, and what the exporter cannot handle has to be refused with a
+ * precise message instead of producing a file that only looks right.
  */
 class PdfExporterTest : public QObject
 {
@@ -21,14 +32,32 @@ class PdfExporterTest : public QObject
 
 private Q_SLOTS:
     void testPageObjects();
-    void testRefusesObjectStreams();
+    void testObjectStreamPageObjects();
+    void testPredictorObjectStreamPageObjects();
+    void testRefusesEncrypted();
+    void testRefusesUnsupportedFilter();
     void testInkLandsWhereItWasDrawn();
     void testSourceTextSurvives();
+    void testRotationsAndOffsetMediaBox();
+    void testObjectStreamRotations();
+    void testPredictorObjectStreamExport();
+    void testBrowserPdfExport();
+    void testManyPageNotebook();
+    void testManyPagePeakMemory();
 
 private:
     QString fixturePath(const QString &name) const
     {
         return QStringLiteral(FILES_DATA_DIR) + name;
+    }
+
+    QByteArray readFile(const QString &path) const
+    {
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            return QByteArray();
+        }
+        return file.readAll();
     }
 
     /// A transparent ink plane with one opaque square near the top left of the *displayed* page.
@@ -49,12 +78,27 @@ private:
     PdfSessionManifest manifestFor(PdfRenderBackend &backend) const
     {
         PdfSessionManifest manifest;
-        manifest.sourceFile = QStringLiteral("text-fixture.pdf");
+        manifest.sourceFile = QStringLiteral("fixture.pdf");
         manifest.sourceSha256 = QByteArrayLiteral("0000");
         manifest.sourceByteSize = 1;
         for (int i = 0; i < backend.pageCount(); ++i) {
             const PdfPageInfo info = backend.pageInfo(i);
             manifest.pages.append(PdfPageRecord{i, info.sizePt, info.rotation,
+                                                PdfSession::pageFileName(i), QString(), 0});
+        }
+        return manifest;
+    }
+
+    /// A manifest for a file Poppler cannot open (an encrypted one), so the refusal can be
+    /// checked where it happens rather than through the renderer.
+    PdfSessionManifest syntheticManifest(int pageCount) const
+    {
+        PdfSessionManifest manifest;
+        manifest.sourceFile = QStringLiteral("fixture.pdf");
+        manifest.sourceSha256 = QByteArrayLiteral("0000");
+        manifest.sourceByteSize = 1;
+        for (int i = 0; i < pageCount; ++i) {
+            manifest.pages.append(PdfPageRecord{i, QSizeF(595, 842), 0,
                                                 PdfSession::pageFileName(i), QString(), 0});
         }
         return manifest;
@@ -78,6 +122,34 @@ private:
         }
         return x1 < 0 ? QRect() : QRect(QPoint(x0, y0), QPoint(x1, y1));
     }
+
+    /// Every exported page has to carry the mark near the top left of the page as displayed.
+    void verifyMarkTopLeft(PdfRenderBackend &exported, int page) const
+    {
+        const QImage rendered = exported.renderPage(page, 72.0);
+        QVERIFY2(!rendered.isNull(), qPrintable(QStringLiteral("page %1 did not render").arg(page)));
+        const QRect bounds = darkBounds(rendered);
+        const QString where = QStringLiteral("page %1: ink at (%2,%3)-(%4,%5), expected about (10,10)")
+                                  .arg(page)
+                                  .arg(bounds.left()).arg(bounds.top())
+                                  .arg(bounds.right()).arg(bounds.bottom());
+        QVERIFY2(bounds.isValid() && qAbs(bounds.left() - 10) <= 4 && qAbs(bounds.top() - 10) <= 4,
+                 qPrintable(where));
+    }
+
+    /// Peak resident set of this process, from /proc. Zero where the kernel does not report it.
+    qint64 peakRssKb() const
+    {
+        const QByteArray status = readFile(QStringLiteral("/proc/self/status"));
+        const int at = status.indexOf("VmHWM:");
+        if (at < 0) {
+            return 0;
+        }
+        const QByteArray line = status.mid(at, 40);
+        bool ok = false;
+        const qint64 value = line.split(':').value(1).trimmed().split(' ').value(0).toLongLong(&ok);
+        return ok ? value : 0;
+    }
 };
 
 void PdfExporterTest::testPageObjects()
@@ -91,12 +163,68 @@ void PdfExporterTest::testPageObjects()
     QCOMPARE(pages, QList<int>({3, 5, 7}));
 }
 
-void PdfExporterTest::testRefusesObjectStreams()
+void PdfExporterTest::testObjectStreamPageObjects()
 {
-    const QByteArray streamed = "%PDF-1.5\n1 0 obj << /Type /ObjStm >> endobj\n";
+    /// Ghostscript wrote this one: the page dictionaries sit in an object stream that a cross
+    /// reference stream points at, which used to be the refusal case.
+    const QByteArray streamed = readFile(fixturePath(QStringLiteral("ex-objstm-rotations.pdf")));
+    QVERIFY(!streamed.isEmpty());
+    QVERIFY(streamed.contains("/Type /ObjStm") || streamed.contains("/Type/ObjStm"));
+    QVERIFY(streamed.contains("/Type /XRef") || streamed.contains("/Type/XRef"));
+
     QString why;
-    QVERIFY(PdfExporter::pageObjectNumbers(streamed, &why).isEmpty());
-    QVERIFY(why.contains(QStringLiteral("object streams")));
+    const QList<int> pages = PdfExporter::pageObjectNumbers(streamed, &why);
+    QVERIFY2(pages.size() == 5, qPrintable(why));
+
+    const QByteArray many = readFile(fixturePath(QStringLiteral("ex-objstm-50p.pdf")));
+    QVERIFY(!many.isEmpty());
+    const QList<int> manyPages = PdfExporter::pageObjectNumbers(many, &why);
+    QVERIFY2(manyPages.size() == 50, qPrintable(why));
+}
+
+void PdfExporterTest::testPredictorObjectStreamPageObjects()
+{
+    const QByteArray bytes = readFile(fixturePath(QStringLiteral("ex-objstm-predictor.pdf")));
+    QVERIFY(!bytes.isEmpty());
+
+    QString why;
+    const QList<int> pages = PdfExporter::pageObjectNumbers(bytes, &why);
+    QVERIFY2(pages.size() == 2, qPrintable(why));
+    QCOMPARE(pages, QList<int>({3, 4}));
+}
+
+void PdfExporterTest::testRefusesEncrypted()
+{
+    const QByteArray encrypted = readFile(fixturePath(QStringLiteral("ex-encrypted.pdf")));
+    QVERIFY(!encrypted.isEmpty());
+
+    QString why;
+    QVERIFY(PdfExporter::pageObjectNumbers(encrypted, &why).isEmpty());
+    QVERIFY2(why.contains(QStringLiteral("encrypted")), qPrintable(why));
+
+    /// And the writer refuses too, rather than leaving a file that only looks right.
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString out = dir.filePath(QStringLiteral("exported.pdf"));
+    why.clear();
+    QVERIFY(!PdfExporter::exportWithInk(fixturePath(QStringLiteral("ex-encrypted.pdf")),
+                                        syntheticManifest(5), {}, out, &why));
+    QVERIFY2(why.contains(QStringLiteral("encrypted")), qPrintable(why));
+    QVERIFY(!QFile::exists(out));
+}
+
+void PdfExporterTest::testRefusesUnsupportedFilter()
+{
+    /// A stream filter the reader does not implement has to be named, not guessed at. The fixture
+    /// is a separate file because editing a filter name in place would move every xref offset.
+    const QByteArray bytes = readFile(fixturePath(QStringLiteral("ex-objstm-badfilter.pdf")));
+    QVERIFY(!bytes.isEmpty());
+    QVERIFY(bytes.contains("/LZWDecode"));
+
+    QString why;
+    QVERIFY(PdfExporter::pageObjectNumbers(bytes, &why).isEmpty());
+    QVERIFY2(why.contains(QStringLiteral("unsupported stream filter")), qPrintable(why));
+    QVERIFY2(why.contains(QStringLiteral("LZWDecode")), qPrintable(why));
 }
 
 void PdfExporterTest::testInkLandsWhereItWasDrawn()
@@ -118,30 +246,13 @@ void PdfExporterTest::testInkLandsWhereItWasDrawn()
     QVERIFY2(PdfExporter::exportWithInk(fixturePath(QStringLiteral("text-fixture.pdf")),
                                         manifestFor(backend), ink, out, &why),
              qPrintable(why));
-    Q_UNUSED(why);
 
     PopplerRenderBackend exported;
     QVERIFY(exported.open(out));
     QCOMPARE(exported.pageCount(), 3);
 
-    /// The mark was drawn near the top left of every displayed page, so it has to come back
-    /// near the top left of every rendered page, rotation included.
     for (int i = 0; i < exported.pageCount(); ++i) {
-        const QImage rendered = exported.renderPage(i, 72.0);
-        QVERIFY(!rendered.isNull());
-
-        const QRect bounds = darkBounds(rendered);
-        QVERIFY2(bounds.isValid(), "no ink appeared at all");
-
-        const QRect expected(10, 10, 50, 50);
-        const QString where = QStringLiteral("page %1: ink at (%2,%3)-(%4,%5), expected about (%6,%7)")
-                                  .arg(i + 1)
-                                  .arg(bounds.left()).arg(bounds.top())
-                                  .arg(bounds.right()).arg(bounds.bottom())
-                                  .arg(expected.left()).arg(expected.top());
-        QVERIFY2(qAbs(bounds.left() - expected.left()) <= 4
-                     && qAbs(bounds.top() - expected.top()) <= 4,
-                 qPrintable(where));
+        verifyMarkTopLeft(exported, i);
     }
 }
 
@@ -169,6 +280,252 @@ void PdfExporterTest::testSourceTextSurvives()
     const QString text = exported.pageText(0);
     QVERIFY2(text.contains(QStringLiteral("Page one heading")), qPrintable(text));
     QVERIFY2(text.contains(QStringLiteral("Plain A4 page.")), qPrintable(text));
+}
+
+void PdfExporterTest::testRotationsAndOffsetMediaBox()
+{
+    PopplerRenderBackend backend;
+    QVERIFY(backend.open(fixturePath(QStringLiteral("ex-rotations.pdf"))));
+    QCOMPARE(backend.pageCount(), 5);
+
+    /// 0, 90, 180 and 270 degrees, the last page with a MediaBox that does not start at (0,0).
+    QCOMPARE(backend.pageInfo(0).sizePt, QSizeF(595, 842));
+    QCOMPARE(backend.pageInfo(1).sizePt, QSizeF(842, 595));
+    QCOMPARE(backend.pageInfo(2).sizePt, QSizeF(595, 842));
+    QCOMPARE(backend.pageInfo(3).sizePt, QSizeF(842, 595));
+    QCOMPARE(backend.pageInfo(4).sizePt, QSizeF(300, 300));
+
+    QHash<int, QImage> ink;
+    for (int i = 0; i < backend.pageCount(); ++i) {
+        const QSizeF sizePt = backend.pageInfo(i).sizePt;
+        ink.insert(i, inkWithMark(QSize(qRound(sizePt.width()), qRound(sizePt.height()))));
+    }
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString out = dir.filePath(QStringLiteral("exported.pdf"));
+
+    QString why;
+    QVERIFY2(PdfExporter::exportWithInk(fixturePath(QStringLiteral("ex-rotations.pdf")),
+                                        manifestFor(backend), ink, out, &why),
+             qPrintable(why));
+
+    PopplerRenderBackend exported;
+    QVERIFY(exported.open(out));
+    QCOMPARE(exported.pageCount(), 5);
+
+    for (int i = 0; i < exported.pageCount(); ++i) {
+        verifyMarkTopLeft(exported, i);
+    }
+
+    const QString last = exported.pageText(4);
+    QVERIFY2(last.contains(QStringLiteral("Offset media box")), qPrintable(last));
+}
+
+void PdfExporterTest::testObjectStreamRotations()
+{
+    /// The same geometry, but produced by Ghostscript: the page dictionaries are compressed
+    /// inside an object stream and every page redefinition has to override a compressed object.
+    PopplerRenderBackend backend;
+    QVERIFY(backend.open(fixturePath(QStringLiteral("ex-objstm-rotations.pdf"))));
+    QCOMPARE(backend.pageCount(), 5);
+    QCOMPARE(backend.pageInfo(4).sizePt, QSizeF(300, 300));
+
+    QHash<int, QImage> ink;
+    for (int i = 0; i < backend.pageCount(); ++i) {
+        const QSizeF sizePt = backend.pageInfo(i).sizePt;
+        ink.insert(i, inkWithMark(QSize(qRound(sizePt.width()), qRound(sizePt.height()))));
+    }
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString out = dir.filePath(QStringLiteral("exported.pdf"));
+
+    QString why;
+    QVERIFY2(PdfExporter::exportWithInk(fixturePath(QStringLiteral("ex-objstm-rotations.pdf")),
+                                        manifestFor(backend), ink, out, &why),
+             qPrintable(why));
+
+    PopplerRenderBackend exported;
+    QVERIFY(exported.open(out));
+    QCOMPARE(exported.pageCount(), 5);
+    for (int i = 0; i < exported.pageCount(); ++i) {
+        verifyMarkTopLeft(exported, i);
+    }
+
+    QVERIFY2(exported.pageText(0).contains(QStringLiteral("Rotation zero")),
+             qPrintable(exported.pageText(0)));
+}
+
+void PdfExporterTest::testPredictorObjectStreamExport()
+{
+    PopplerRenderBackend backend;
+    QVERIFY(backend.open(fixturePath(QStringLiteral("ex-objstm-predictor.pdf"))));
+    QCOMPARE(backend.pageCount(), 2);
+
+    QHash<int, QImage> ink;
+    ink.insert(0, inkWithMark(QSize(595, 842)));
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString out = dir.filePath(QStringLiteral("exported.pdf"));
+
+    QString why;
+    QVERIFY2(PdfExporter::exportWithInk(fixturePath(QStringLiteral("ex-objstm-predictor.pdf")),
+                                        manifestFor(backend), ink, out, &why),
+             qPrintable(why));
+
+    PopplerRenderBackend exported;
+    QVERIFY(exported.open(out));
+    QCOMPARE(exported.pageCount(), 2);
+    verifyMarkTopLeft(exported, 0);
+
+    QVERIFY2(exported.pageText(0).contains(QStringLiteral("Predictor page one")),
+             qPrintable(exported.pageText(0)));
+    QVERIFY2(exported.pageText(1).contains(QStringLiteral("Predictor page two")),
+             qPrintable(exported.pageText(1)));
+
+    /// Page two had no ink, so every byte of it has to be exactly where it was.
+    const QByteArray source = readFile(fixturePath(QStringLiteral("ex-objstm-predictor.pdf")));
+    const QByteArray result = readFile(out);
+    QVERIFY(result.startsWith(source));
+}
+
+void PdfExporterTest::testBrowserPdfExport()
+{
+    /// A real browser print (Skia/PDF): its own object layout, compact dictionaries and a
+    /// trailer with /Info, which is what the attribute-preserving update has to survive.
+    PopplerRenderBackend backend;
+    QVERIFY(backend.open(fixturePath(QStringLiteral("ex-browser-3p.pdf"))));
+    QCOMPARE(backend.pageCount(), 3);
+
+    QHash<int, QImage> ink;
+    for (int i = 0; i < backend.pageCount(); ++i) {
+        const QSizeF sizePt = backend.pageInfo(i).sizePt;
+        ink.insert(i, inkWithMark(QSize(qRound(sizePt.width()), qRound(sizePt.height()))));
+    }
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString out = dir.filePath(QStringLiteral("exported.pdf"));
+
+    QString why;
+    QVERIFY2(PdfExporter::exportWithInk(fixturePath(QStringLiteral("ex-browser-3p.pdf")),
+                                        manifestFor(backend), ink, out, &why),
+             qPrintable(why));
+
+    PopplerRenderBackend exported;
+    QVERIFY(exported.open(out));
+    QCOMPARE(exported.pageCount(), 3);
+    for (int i = 0; i < 3; ++i) {
+        verifyMarkTopLeft(exported, i);
+        QVERIFY2(exported.pageText(i).contains(QStringLiteral("Browser page")),
+                 qPrintable(exported.pageText(i)));
+    }
+}
+
+void PdfExporterTest::testManyPageNotebook()
+{
+    const QString fixture = fixturePath(QStringLiteral("ex-objstm-50p.pdf"));
+    PopplerRenderBackend backend;
+    QVERIFY(backend.open(fixture));
+    QCOMPARE(backend.pageCount(), 50);
+
+    /// Ink on every other page, so the untouched half can be compared byte for byte.
+    QHash<int, QImage> ink;
+    for (int i = 0; i < 50; i += 2) {
+        const QSizeF sizePt = backend.pageInfo(i).sizePt;
+        ink.insert(i, inkWithMark(QSize(qRound(sizePt.width()), qRound(sizePt.height()))));
+    }
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString out = dir.filePath(QStringLiteral("exported.pdf"));
+
+    QString why;
+    QElapsedTimer timer;
+    timer.start();
+    QVERIFY2(PdfExporter::exportWithInk(fixture, manifestFor(backend), ink, out, &why),
+             qPrintable(why));
+    const qint64 elapsedMs = timer.elapsed();
+
+    const QByteArray source = readFile(fixture);
+    const QByteArray result = readFile(out);
+    QVERIFY(!result.isEmpty());
+
+    /// The source is never rewritten: every original byte is still in front of the update.
+    QVERIFY(result.startsWith(source));
+
+    PopplerRenderBackend exported;
+    QVERIFY(exported.open(out));
+    QCOMPARE(exported.pageCount(), 50);
+
+    for (int i = 0; i < 50; ++i) {
+        const QString text = exported.pageText(i);
+        QVERIFY2(text.contains(QStringLiteral("Page %1 heading").arg(i + 1)), qPrintable(text));
+
+        if (i % 2 == 0) {
+            verifyMarkTopLeft(exported, i);
+        } else {
+            /// An untouched page renders exactly as it did in the source.
+            QVERIFY2(source.at(0) == '%', "fixture is not a PDF");
+            QCOMPARE(exported.renderPage(i, 72.0), backend.renderPage(i, 72.0));
+        }
+    }
+
+    qInfo("50-page notebook: exported %d bytes from %d bytes of source in %lld ms",
+          int(result.size()), int(source.size()), static_cast<long long>(elapsedMs));
+}
+
+void PdfExporterTest::testManyPagePeakMemory()
+{
+    const QString fixture = fixturePath(QStringLiteral("ex-objstm-50p.pdf"));
+    PopplerRenderBackend backend;
+    QVERIFY(backend.open(fixture));
+    QCOMPARE(backend.pageCount(), 50);
+
+    const qint64 rssBeforeInk = peakRssKb();
+
+    /// The worst case an application can hand the exporter: a full size plane for all 50 pages.
+    QHash<int, QImage> ink;
+    for (int i = 0; i < 50; ++i) {
+        const QSizeF sizePt = backend.pageInfo(i).sizePt;
+        ink.insert(i, inkWithMark(QSize(qRound(sizePt.width()), qRound(sizePt.height()))));
+    }
+    const qint64 rssWithInk = peakRssKb();
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString out = dir.filePath(QStringLiteral("exported.pdf"));
+
+    QString why;
+    QElapsedTimer timer;
+    timer.start();
+    QVERIFY2(PdfExporter::exportWithInk(fixture, manifestFor(backend), ink, out, &why),
+             qPrintable(why));
+    const qint64 elapsedMs = timer.elapsed();
+    const qint64 rssAfterExport = peakRssKb();
+
+    PopplerRenderBackend exported;
+    QVERIFY(exported.open(out));
+    QCOMPARE(exported.pageCount(), 50);
+    verifyMarkTopLeft(exported, 0);
+    verifyMarkTopLeft(exported, 49);
+
+    const QByteArray result = readFile(out);
+    qInfo("50-page full ink export: %lld ms, output %d bytes, VmHWM before ink %lld kB, "
+          "with ink %lld kB, after export %lld kB",
+          static_cast<long long>(elapsedMs), int(result.size()),
+          static_cast<long long>(rssBeforeInk), static_cast<long long>(rssWithInk),
+          static_cast<long long>(rssAfterExport));
+
+    /// Keep a copy for the independent viewer cross-check when asked to.
+    const QByteArray keep = qgetenv("PDFIO_EXPORT_KEEP");
+    if (!keep.isEmpty()) {
+        QFile::remove(QString::fromLocal8Bit(keep));
+        QVERIFY2(QFile::copy(out, QString::fromLocal8Bit(keep)),
+                 qPrintable(QString::fromLocal8Bit(keep)));
+    }
 }
 
 QTEST_MAIN(PdfExporterTest)
