@@ -38,6 +38,18 @@ public:
     static PdfSessionManifest openProject(const QString &projectDir, QString *why = nullptr);
 
     /**
+     * Whether \a relative, joined onto \a projectDir, stays inside it.
+     *
+     * The manifest rule refuses the names that escape before a consumer ever sees one; this is the
+     * join itself, checked where it is made. openProject() runs it on the source before reading
+     * anything, so a project directory placed on the machine by hand cannot make the session step
+     * outside itself even if the rule above is ever relaxed or a caller builds a manifest in code.
+     */
+    static bool isPathInsideProject(const QString &projectDir,
+                                    const QString &relative,
+                                    QString *why = nullptr);
+
+    /**
      * Where the notebook directories live.
      *
      * Documents, so the working format is somewhere the user can find it, on the desktop. The

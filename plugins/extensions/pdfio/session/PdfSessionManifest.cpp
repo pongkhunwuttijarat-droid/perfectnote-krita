@@ -7,10 +7,12 @@
 #include "PdfSessionManifest.h"
 
 #include <QCryptographicHash>
+#include <QDir>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonParseError>
+#include <QStringList>
 
 const int PdfSessionManifest::CurrentSchema = 1;
 
@@ -39,6 +41,46 @@ void fail(QString *why, const QString &message)
 
 } // namespace
 
+bool PdfSessionManifest::isSafeRelativePath(const QString &path, QString *why)
+{
+    if (path.isEmpty()) {
+        fail(why, QStringLiteral("it is empty"));
+        return false;
+    }
+    if (QDir::isAbsolutePath(path) || path.startsWith(QLatin1Char('/'))) {
+        fail(why, QStringLiteral("it is an absolute path"));
+        return false;
+    }
+    /// Refused before the drive check, and before anything could treat it as one separator: on a
+    /// platform where a backslash is a separator this is the same escape as "../", and on this one
+    /// it is a name an archive tool or a file manager may still read as a path.
+    if (path.contains(QLatin1Char('\\'))) {
+        fail(why, QStringLiteral("it uses a backslash as a separator"));
+        return false;
+    }
+    if (path.size() >= 2 && path.at(1) == QLatin1Char(':')) {
+        fail(why, QStringLiteral("it names a drive"));
+        return false;
+    }
+
+    const QStringList components = path.split(QLatin1Char('/'));
+    for (const QString &component : components) {
+        if (component.isEmpty()) {
+            fail(why, QStringLiteral("it has an empty path component"));
+            return false;
+        }
+        if (component == QLatin1String(".")) {
+            fail(why, QStringLiteral("it names the project directory itself"));
+            return false;
+        }
+        if (component == QLatin1String("..")) {
+            fail(why, QStringLiteral("it escapes the project directory"));
+            return false;
+        }
+    }
+    return true;
+}
+
 bool PdfSessionManifest::isValid(QString *why) const
 {
     if (schema != CurrentSchema) {
@@ -57,9 +99,37 @@ bool PdfSessionManifest::isValid(QString *why) const
         fail(why, QStringLiteral("no pages recorded"));
         return false;
     }
+    /// Every field that names a file is checked here, once, where the manifest enters the session.
+    /// readFrom(), fromJson() and PdfSession::openProject() all come through isValid(), and every
+    /// consumer joins these names onto the project directory afterwards -- so this is the one place
+    /// a hand-placed project directory, or a manifest that has been edited, cannot get past.
+    QString reason;
+    if (!isSafeRelativePath(sourceFile, &reason)) {
+        fail(why, QStringLiteral("the manifest's source file \"%1\" is not a file inside the project: %2")
+                      .arg(sourceFile, reason));
+        return false;
+    }
+
     for (const PdfPageRecord &page : pages) {
-        if (page.index < 0 || !page.sizePt.isValid() || page.kraFile.isEmpty()) {
+        if (page.index < 0 || !page.sizePt.isValid()) {
             fail(why, QStringLiteral("page %1 is incomplete").arg(page.index));
+            return false;
+        }
+        if (page.kraFile.isEmpty()) {
+            fail(why, QStringLiteral("the manifest's page %1 ink file is not recorded").arg(page.index + 1));
+            return false;
+        }
+        if (!isSafeRelativePath(page.kraFile, &reason)) {
+            fail(why, QStringLiteral("the manifest's page %1 ink file \"%2\" is not a file inside the project: %3")
+                          .arg(page.index + 1).arg(page.kraFile, reason));
+            return false;
+        }
+
+        /// An empty thumbnail stays legal -- see PdfPageRecord::thumbFile. A name that is there is
+        /// checked like any other, because the docker and the strip decoration join it.
+        if (!page.thumbFile.isEmpty() && !isSafeRelativePath(page.thumbFile, &reason)) {
+            fail(why, QStringLiteral("the manifest's page %1 thumbnail \"%2\" is not a file inside the project: %3")
+                          .arg(page.index + 1).arg(page.thumbFile, reason));
             return false;
         }
     }

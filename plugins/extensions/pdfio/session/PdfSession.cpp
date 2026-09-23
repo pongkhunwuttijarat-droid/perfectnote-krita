@@ -87,7 +87,21 @@ QString PdfSession::manifestPath(const QString &projectDir)
 
 QString PdfSession::sourcePath(const QString &projectDir, const QString &sourceFile)
 {
+    /// Deliberately a plain join: this is the path builder every consumer uses, and the names it is
+    /// handed have already been checked by PdfSessionManifest::isValid(). openProject() checks the
+    /// join itself below; createProject() builds the name from QFileInfo::fileName().
     return QDir(projectDir).filePath(sourceFile);
+}
+
+bool PdfSession::isPathInsideProject(const QString &projectDir, const QString &relative, QString *why)
+{
+    const QString root = QDir::cleanPath(QDir(projectDir).absolutePath());
+    const QString joined = QDir::cleanPath(QDir(projectDir).filePath(relative));
+    if (joined == root || !joined.startsWith(root + QLatin1Char('/'))) {
+        fail(why, QStringLiteral("\"%1\" does not stay inside %2").arg(relative, root));
+        return false;
+    }
+    return true;
 }
 
 QString PdfSession::pageFileName(int index)
@@ -167,6 +181,14 @@ PdfSessionManifest PdfSession::openProject(const QString &projectDir, QString *w
 {
     const PdfSessionManifest manifest = PdfSessionManifest::readFrom(manifestPath(projectDir), why);
     if (!manifest.isValid(why)) {
+        return PdfSessionManifest();
+    }
+
+    /// The rule in the manifest already refuses the names that escape, and the join is checked
+    /// again here: this is the one function every consumer goes through before it reads or writes
+    /// anything, and a check made where the path is built cannot be outflanked by a rule that was
+    /// applied somewhere else.
+    if (!isPathInsideProject(projectDir, manifest.sourceFile, why)) {
         return PdfSessionManifest();
     }
 

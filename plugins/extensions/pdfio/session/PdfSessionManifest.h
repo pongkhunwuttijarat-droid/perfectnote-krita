@@ -26,8 +26,17 @@ struct PdfPageRecord {
     QSizeF sizePt;
     /// The /Rotate the file declares, kept so the manifest survives a renderer change.
     int rotation = 0;
-    /// Paths are relative to the project directory, so a project can be moved.
+    /// Paths are relative to the project directory, so a project can be moved. Both are checked
+    /// by PdfSessionManifest::isSafeRelativePath() before anything joins them onto a directory.
     QString kraFile;
+    /**
+     * The page's preview, relative to the project directory.
+     *
+     * An empty string is legal and means "no thumbnail yet": a page whose preview has not been
+     * made records none, and refusing it would make notebooks that open today stop opening. It
+     * does not mean the project directory, so a consumer has to skip an empty thumbnail rather
+     * than join it.
+     */
     QString thumbFile;
     /// Bumped on every committed save of this page; used to reason about recovery.
     int generation = 0;
@@ -53,6 +62,22 @@ public:
     QByteArray sourceSha256;
     qint64 sourceByteSize = 0;
     QList<PdfPageRecord> pages;
+
+    /**
+     * Whether \a path is a file name this manifest may carry, and the one rule for all of them.
+     *
+     * Every field that names a file -- the source, each page's ink, each page's thumbnail -- is
+     * joined onto the project directory by whoever reads it: PdfSession::sourcePath(), the
+     * navigator, the page saver, the docker. A value that is absolute or climbs out of the
+     * directory turns opening a document into a read or a write of the manifest's choosing, so
+     * the rule is applied in isValid() -- which readFrom(), fromJson() and openProject() all run
+     * -- rather than at each of those joins, and every consumer can then trust the file.
+     *
+     * A name is safe when it is relative, uses forward slashes, has no empty, "." or ".."
+     * component, does not use a backslash as a separator, and does not start with a drive letter.
+     * Spaces, dots, unicode and subdirectories inside the project are all legitimate.
+     */
+    static bool isSafeRelativePath(const QString &path, QString *why = nullptr);
 
     bool isValid(QString *why = nullptr) const;
 
