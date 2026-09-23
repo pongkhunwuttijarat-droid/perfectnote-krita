@@ -145,10 +145,20 @@ public:
                         QStringList *ignoredEntries = nullptr);
 
     /**
-     * The archive path rule, exposed so the refusal can be tested on its own.
+     * The path rule, exposed so the refusal can be tested on its own.
      *
      * A path is safe when it is relative, uses forward slashes, has no empty, "." or ".."
-     * component, and does not start with a drive letter.
+     * component, and does not start with a drive letter. It is applied to two different sets of
+     * names and both matter: the archive's entries, and the file names the manifest itself
+     * declares (source.file, pages[].kraFile, thumbs[].thumbFile), which are joined onto the
+     * staging directory and written to just the same.
+     *
+     * On the absolute case: KArchive's zip reader strips a leading "/" from an entry name, so an
+     * entry stored as "/tmp/x" is handed back as "tmp/x" and there is nothing left to refuse --
+     * it arrives as an ordinary relative name and is reported as an unknown entry instead. The
+     * check stays, because the name is the archive's and not ours, and a reader that does not
+     * normalise it would otherwise be handed an absolute path; the guarantee that is tested end to
+     * end is the one that matters, that an absolute entry never escapes the destination.
      */
     static bool isSafeEntryPath(const QString &path, QString *why = nullptr);
 

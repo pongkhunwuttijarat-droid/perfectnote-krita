@@ -236,6 +236,72 @@ bool removeTree(const QString &path)
     return QDir(path).removeRecursively();
 }
 
+/**
+ * The archive-entry rule applied to the paths the manifest itself declares.
+ *
+ * An archive entry is not the only lever a hostile bundle has. source.file, pages[].kraFile and
+ * thumbs[].thumbFile are all joined onto the staging directory and written to, so a manifest that
+ * names "/tmp/x.pdf" or "../../x.pdf" gets a write of its own choosing while every entry in the
+ * archive is a perfectly ordinary name. The same rule therefore has to be applied to them, and it
+ * has to be applied here -- in analyze(), which inspect() also runs -- so that the pre-flight
+ * refuses exactly what extract() would.
+ *
+ * An empty thumbFile is not an error: a page whose thumbnail has not been made yet records none,
+ * and every other piece of code skips it.
+ */
+bool validateManifestPaths(const PdfSessionManifest &manifest, QString *why)
+{
+    const auto check = [why](const QString &path, const QString &what) {
+        QString reason;
+        if (path.isEmpty()) {
+            fail(why, QStringLiteral("the manifest names no %1").arg(what));
+            return false;
+        }
+        if (!PdfNotebookBundle::isSafeEntryPath(path, &reason)) {
+            fail(why, QStringLiteral("the manifest's %1 \"%2\" is not a name inside the notebook: %3")
+                          .arg(what, path, reason));
+            return false;
+        }
+        return true;
+    };
+
+    if (!check(manifest.sourceFile, QStringLiteral("source file"))) {
+        return false;
+    }
+    for (const PdfPageRecord &page : manifest.pages) {
+        if (!check(page.kraFile, QStringLiteral("page %1 ink file").arg(page.index + 1))) {
+            return false;
+        }
+        if (!page.thumbFile.isEmpty()
+            && !check(page.thumbFile, QStringLiteral("page %1 thumbnail").arg(page.index + 1))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * Where \a relative lands under \a root, refusing anything that does not stay inside it.
+ *
+ * validateManifestPaths() already refuses the shapes that escape; this is the other half of the
+ * same check and it is what makes "absolute only after joining" impossible rather than unlikely:
+ * the joined, cleaned path still has to be under the root. \a root is the staging directory, so
+ * the answer is also false for the root itself -- a file has to be a file.
+ */
+bool destinationInside(const QString &root, const QString &relative, QString *destination, QString *why)
+{
+    const QString cleanRoot = QDir::cleanPath(QDir(root).absolutePath());
+    const QString joined = QDir::cleanPath(QDir(root).filePath(relative));
+    if (joined == cleanRoot || !joined.startsWith(cleanRoot + QLatin1Char('/'))) {
+        fail(why, QStringLiteral("refusing %1: it would be written outside %2").arg(relative, cleanRoot));
+        return false;
+    }
+    if (destination) {
+        *destination = joined;
+    }
+    return true;
+}
+
 struct Analysis {
     PdfNotebookBundle::Info info;
     QList<ArchiveEntry> files;
@@ -379,6 +445,13 @@ bool analyze(const KZip &zip, const QString &bundlePath, Analysis *analysis, QSt
         return false;
     }
     const PdfSessionManifest &manifest = analysis->info.manifest;
+
+    /// Every file the manifest names, before one of them is joined onto a destination. The archive
+    /// is not the only place a path comes from, and this is the check that keeps a hostile
+    /// manifest from choosing where the source is written.
+    if (!validateManifestPaths(manifest, why)) {
+        return false;
+    }
 
     /// The source. Normally at the name the manifest records; a bundle written by hand may simply
     /// have called it source.pdf, which is the same thing under the name the format documents.
@@ -665,6 +738,12 @@ bool PdfNotebookBundle::save(const QString &projectDir, const QString &outPath, 
         return false;
     }
 
+    /// A project whose manifest names a file outside itself would have that file read into the
+    /// bundle: the same rule as on the way in, for the same reason.
+    if (!validateManifestPaths(manifest, why)) {
+        return false;
+    }
+
     const QString source = PdfSession::sourcePath(projectDir, manifest.sourceFile);
     if (!QFileInfo::exists(source)) {
         fail(why, QStringLiteral("the notebook has no source at %1").arg(source));
@@ -810,8 +889,13 @@ bool PdfNotebookBundle::extract(const QString &bundlePath,
     }
 
     /// The source goes to the name the manifest records, which is not necessarily the name the
-    /// entry was stored under: a bundle may call it source.pdf, and the project cannot.
-    const QString stagedSource = QDir(stagingPath).filePath(manifest.sourceFile);
+    /// entry was stored under: a bundle may call it source.pdf, and the project cannot. That name
+    /// was checked by validateManifestPaths() and is checked again here against the staging root,
+    /// because it is the manifest's string that decides where this write goes.
+    QString stagedSource;
+    if (!destinationInside(stagingPath, manifest.sourceFile, &stagedSource, why)) {
+        return false;
+    }
     if (!copyEntryTo(findEntry(analysis.files, analysis.info.sourceEntry), stagedSource, why)) {
         return false;
     }
@@ -823,7 +907,12 @@ bool PdfNotebookBundle::extract(const QString &bundlePath,
             if (!file) {
                 continue;
             }
-            if (!copyEntryTo(file, QDir(stagingPath).filePath(reference), why)) {
+
+            QString stagedArtifact;
+            if (!destinationInside(stagingPath, reference, &stagedArtifact, why)) {
+                return false;
+            }
+            if (!copyEntryTo(file, stagedArtifact, why)) {
                 return false;
             }
         }

@@ -192,6 +192,43 @@ bool writeRawBundle(const QString &path, const QList<QPair<QString, QByteArray>>
     return zip.close();
 }
 
+/// The project's manifest as a mutable JSON object, so a test can change one field of it.
+QJsonObject manifestObjectOf(const QString &project)
+{
+    return QJsonDocument::fromJson(readBytes(QDir(project).filePath(QStringLiteral("manifest.json")))).object();
+}
+
+/**
+ * A bundle whose archive is a project's own files but whose manifest has been rewritten.
+ *
+ * The archive is not the attacker's only lever: source.file, pages[].kraFile and
+ * thumbs[].thumbFile are joined onto the destination and written to, so a bundle whose entries are
+ * all ordinary can still have a write of its choosing in it. This is the shape the verifier's C1
+ * and C2 used, and the shape the refusals have to survive.
+ */
+bool writeBundleWithEditedManifest(const QString &bundlePath,
+                                   const QString &project,
+                                   const QJsonObject &editedManifest)
+{
+    const PdfSessionManifest original =
+        PdfSessionManifest::readFrom(QDir(project).filePath(QStringLiteral("manifest.json")));
+
+    QList<QPair<QString, QByteArray>> entries;
+    entries.append(qMakePair(QStringLiteral("manifest.json"), QJsonDocument(editedManifest).toJson()));
+    entries.append(qMakePair(QStringLiteral("source.pdf"),
+                             readBytes(QDir(project).filePath(QStringLiteral("source.pdf")))));
+    for (const PdfPageRecord &page : original.pages) {
+        const QString references[] = { page.kraFile, page.thumbFile };
+        for (const QString &relative : references) {
+            const QString local = QDir(project).filePath(relative);
+            if (QFileInfo::exists(local)) {
+                entries.append(qMakePair(relative, readBytes(local)));
+            }
+        }
+    }
+    return writeRawBundle(bundlePath, entries);
+}
+
 } // namespace
 
 /**
@@ -219,6 +256,10 @@ private Q_SLOTS:
     void testRefusesAReferencedArtifactTheArchiveLacks();
     void testRefusesACorruptOrTruncatedArchive();
     void testRefusesAnEditedBundle();
+    void testRefusesAnEscapingManifestSource();
+    void testRefusesAnEscapingManifestPage();
+    void testSaveRefusesAnEscapingManifest();
+    void testAbsoluteEntryIsNormalisedAndNeverEscapes();
     void testMeasuresSizeAndTimeOnThreeAndFiftyPages();
 
 private:
@@ -547,18 +588,20 @@ void PdfNotebookBundleTest::testRefusesZipSlip()
         { pageName(0), readBytes(QDir(project).filePath(pageName(0))) },
         { thumbName(0), readBytes(QDir(project).filePath(thumbName(0))) },
         { QStringLiteral("../escape.txt"), QByteArrayLiteral("gotcha") },
-        { QStringLiteral("/tmp/pdfio-absolute-escape.txt"), QByteArrayLiteral("gotcha") },
     }));
     QVERIFY(!manifest.sourceSha256.isEmpty());
 
+    /// No absolute entry here on purpose: KZip strips a leading "/" when it writes, so a KZip-made
+    /// archive cannot carry one and the assertion would be vacuous. The absolute case is covered by
+    /// testAbsoluteEntryIsNormalisedAndNeverEscapes(), which uses a fixture written by
+    /// tests/data/nb-make-fixtures.py, and the rule itself is exercised for "/etc/passwd" above.
     const QString dest = dir.filePath(QStringLiteral("outside/unpacked"));
     why.clear();
     QVERIFY(!PdfNotebookBundle::extract(bundle, dest, &why));
-    QVERIFY2(why.contains(QStringLiteral("escape")) || why.contains(QStringLiteral("absolute")), qPrintable(why));
+    QVERIFY2(why.contains(QStringLiteral("escape")), qPrintable(why));
     QVERIFY(!QFileInfo::exists(dest));
     QVERIFY(!QFileInfo::exists(dir.filePath(QStringLiteral("outside/escape.txt"))));
     QVERIFY(!QFileInfo::exists(dir.filePath(QStringLiteral("escape.txt"))));
-    QVERIFY(!QFileInfo::exists(QStringLiteral("/tmp/pdfio-absolute-escape.txt")));
 }
 
 void PdfNotebookBundleTest::testRefusesAChangedSource()
@@ -760,6 +803,172 @@ void PdfNotebookBundleTest::testMeasuresSizeAndTimeOnThreeAndFiftyPages()
         QVERIFY2(PdfSession::openProject(dest, &why).isValid(&why), qPrintable(why));
         QVERIFY(QFileInfo(bundle).size() > 0);
     }
+}
+
+void PdfNotebookBundleTest::testRefusesAnEscapingManifestSource()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    const QString project = dir.filePath(QStringLiteral("project"));
+    QVERIFY(makeProject(project, 1, 1, 1).isValid());
+
+    /// The archive is entirely ordinary here: a plain source.pdf entry and every page artifact.
+    /// Only source.file differs. That is C1 of docs/verify/BUNDLE-VERIFY.md (absolute; the verifier
+    /// used /tmp and any absolute path is the same shape) and C2 (relative, two levels up).
+    const QString absolute = dir.filePath(QStringLiteral("outside/nb-absolute-escape.pdf"));
+    const QList<QPair<QString, QString>> escapes = {
+        { QStringLiteral("absolute"), absolute },
+        { QStringLiteral("relative"), QStringLiteral("../../nb-relative-escape.pdf") },
+        { QStringLiteral("joined"), QStringLiteral("pages/../../nb-joined-escape.pdf") },
+    };
+
+    for (const QPair<QString, QString> &escape : escapes) {
+        QJsonObject manifest = manifestObjectOf(project);
+        QJsonObject source = manifest.value(QStringLiteral("source")).toObject();
+        source.insert(QStringLiteral("file"), escape.second);
+        manifest.insert(QStringLiteral("source"), source);
+
+        const QString bundle = dir.filePath(QStringLiteral("source-%1.pnb").arg(escape.first));
+        QVERIFY2(writeBundleWithEditedManifest(bundle, project, manifest), qPrintable(escape.first));
+
+        /// inspect() has to refuse it too: a pre-flight that says yes to what extract() refuses
+        /// would be the same hole one step earlier.
+        QString why;
+        QVERIFY2(!PdfNotebookBundle::inspect(bundle, &why).isValid(), qPrintable(escape.first));
+        QVERIFY2(why.contains(QStringLiteral("manifest's source file")), qPrintable(escape.first + ": " + why));
+        QVERIFY2(why.contains(QStringLiteral("escape")) || why.contains(QStringLiteral("absolute")),
+                 qPrintable(escape.first + ": " + why));
+
+        const QString dest = dir.filePath(QStringLiteral("unpacked-%1").arg(escape.first));
+        why.clear();
+        QVERIFY(!PdfNotebookBundle::extract(bundle, dest, &why));
+        QVERIFY2(why.contains(QStringLiteral("manifest's source file")), qPrintable(why));
+
+        /// Refused means nothing was written anywhere: no destination, and nothing at the path the
+        /// manifest named -- which is the write C1 and C2 performed.
+        QVERIFY(!QFileInfo::exists(dest));
+        QVERIFY(!QFileInfo::exists(escape.second));
+        QVERIFY(!QFileInfo::exists(QDir(dest).filePath(escape.second)));
+    }
+
+    /// Control: the same archive with the project's own manifest extracts, so what is refused is the
+    /// manifest's path and nothing else about the file.
+    const QString control = dir.filePath(QStringLiteral("control.pnb"));
+    QVERIFY(writeBundleWithEditedManifest(control, project, manifestObjectOf(project)));
+    const QString controlDest = dir.filePath(QStringLiteral("control-unpacked"));
+    QString why;
+    QVERIFY2(PdfNotebookBundle::extract(control, controlDest, &why), qPrintable(why));
+    QVERIFY2(PdfSession::openProject(controlDest, &why).isValid(&why), qPrintable(why));
+}
+
+void PdfNotebookBundleTest::testRefusesAnEscapingManifestPage()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    const QString project = dir.filePath(QStringLiteral("project"));
+    QVERIFY(makeProject(project, 2, 2, 2).isValid());
+
+    /// The page fields are joined onto the destination exactly like the source is. The verifier
+    /// could not reach a write through them, because a reference that is not also an entry was
+    /// caught as "does not carry"; with the rule applied to the manifest they are refused for what
+    /// they are, which is the difference between an accidental refusal and a check.
+    const QList<QPair<QString, QString>> cases = {
+        { QStringLiteral("kra"), QStringLiteral("/tmp/nb-page-escape.kra") },
+        { QStringLiteral("thumb"), QStringLiteral("../../nb-thumb-escape.png") },
+    };
+
+    for (const QPair<QString, QString> &testCase : cases) {
+        QJsonObject manifest = manifestObjectOf(project);
+        QJsonArray pages = manifest.value(QStringLiteral("pages")).toArray();
+        QJsonObject page = pages.at(0).toObject();
+        page.insert(testCase.first, testCase.second);
+        pages.replace(0, page);
+        manifest.insert(QStringLiteral("pages"), pages);
+
+        const QString bundle = dir.filePath(QStringLiteral("page-%1.pnb").arg(testCase.first));
+        QVERIFY2(writeBundleWithEditedManifest(bundle, project, manifest), qPrintable(testCase.first));
+
+        QString why;
+        QVERIFY(!PdfNotebookBundle::inspect(bundle, &why).isValid());
+        QVERIFY2(why.contains(QStringLiteral("manifest's page 1")), qPrintable(why));
+        QVERIFY2(why.contains(QStringLiteral("escape")) || why.contains(QStringLiteral("absolute")),
+                 qPrintable(why));
+        QVERIFY2(why.contains(testCase.first == QStringLiteral("kra") ? QStringLiteral("ink file")
+                                                                     : QStringLiteral("thumbnail")),
+                 qPrintable(why));
+
+        const QString dest = dir.filePath(QStringLiteral("unpacked-%1").arg(testCase.first));
+        why.clear();
+        QVERIFY(!PdfNotebookBundle::extract(bundle, dest, &why));
+        QVERIFY(!QFileInfo::exists(dest));
+    }
+}
+
+void PdfNotebookBundleTest::testSaveRefusesAnEscapingManifest()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    const QString project = dir.filePath(QStringLiteral("project"));
+    QVERIFY(makeProject(project, 1, 1, 1).isValid());
+
+    /// The same hole in the other direction: a project whose own manifest names a file outside it
+    /// would have that file read into the bundle.
+    const QString outside = dir.filePath(QStringLiteral("outside.pdf"));
+    writeBytes(outside, QByteArrayLiteral("a file the notebook does not own"));
+
+    QJsonObject manifest = manifestObjectOf(project);
+    QJsonObject source = manifest.value(QStringLiteral("source")).toObject();
+    source.insert(QStringLiteral("file"), outside);
+    manifest.insert(QStringLiteral("source"), source);
+    writeBytes(QDir(project).filePath(QStringLiteral("manifest.json")), QJsonDocument(manifest).toJson());
+
+    const QString bundle = dir.filePath(QStringLiteral("should-not-exist.pnb"));
+    QString why;
+    QVERIFY(!PdfNotebookBundle::save(project, bundle, &why));
+    QVERIFY2(why.contains(QStringLiteral("manifest's source file")), qPrintable(why));
+    QVERIFY(!QFileInfo::exists(bundle));
+}
+
+void PdfNotebookBundleTest::testAbsoluteEntryIsNormalisedAndNeverEscapes()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    const QString bundle = fixturePath(QStringLiteral("nb-absolute-entry.pnb"));
+    QVERIFY(QFileInfo::exists(bundle));
+
+    /// The rule refuses an absolute path on its own...
+    QString why;
+    QVERIFY(!PdfNotebookBundle::isSafeEntryPath(QStringLiteral("/tmp/nb-absolute-escape.txt"), &why));
+    QVERIFY2(why.contains(QStringLiteral("absolute")), qPrintable(why));
+
+    /// ...but KArchive's zip reader strips the leading "/" before the name reaches this code, so by
+    /// the time there is a name to judge it is the ordinary relative one below and there is nothing
+    /// left to refuse. The fixture is written by tests/data/nb-make-fixtures.py with Python's
+    /// zipfile for exactly that reason -- KZip strips the slash on the way in, so it cannot produce
+    /// the file -- and "unzip -l" shows the stored name really is "/tmp/nb-absolute-escape.txt".
+    const PdfNotebookBundle::Info info = PdfNotebookBundle::inspect(bundle, &why);
+    QVERIFY2(info.isValid(), qPrintable(why));
+    QCOMPARE(info.unknown, QStringList({ QStringLiteral("tmp/nb-absolute-escape.txt") }));
+
+    const QString dest = dir.filePath(QStringLiteral("unpacked"));
+    QStringList ignored;
+    QVERIFY2(PdfNotebookBundle::extract(bundle, dest, &why, &ignored), qPrintable(why));
+    QCOMPARE(ignored, QStringList({ QStringLiteral("tmp/nb-absolute-escape.txt") }));
+
+    /// The guarantee, and the only one KZip leaves room for: it never escapes.
+    QVERIFY(!QFileInfo::exists(QStringLiteral("/tmp/nb-absolute-escape.txt")));
+    QVERIFY(!QFileInfo::exists(QDir(dest).filePath(QStringLiteral("tmp/nb-absolute-escape.txt"))));
+    QVERIFY(!QFileInfo::exists(QDir(dest).filePath(QStringLiteral("tmp"))));
+
+    /// And the notebook around it is still whole: the entry is reported and ignored, not a reason
+    /// to refuse the notebook.
+    QVERIFY(QFileInfo::exists(QDir(dest).filePath(QStringLiteral("source.pdf"))));
+    QVERIFY(QFileInfo::exists(QDir(dest).filePath(QStringLiteral("pages/p0001.kra"))));
+    QVERIFY2(PdfSession::openProject(dest, &why).isValid(&why), qPrintable(why));
 }
 
 QTEST_MAIN(PdfNotebookBundleTest)
