@@ -785,8 +785,27 @@ bool PdfPageNavigator::showImage(KisImageSP image, KisNodeSP activeNode, int ind
     Q_UNUSED(why);
 
     KisDocument *document = KisPart::instance()->createDocument();
-    document->documentInfo()->setAboutInfo(QStringLiteral("title"),
-                                           QFileInfo(m_manifest.sourceFile).completeBaseName());
+
+    /// A page is not a file, and Krita must not treat it as one.
+    ///
+    /// The document has no URL, so as soon as it is modified Krita's autosave timer starts and
+    /// generateAutoSaveFileName() falls back to Krita's default autosave location -- where the
+    /// next start offers it in the recovery dialog, next to a normal user's own files. Worse, what
+    /// would be written is the whole editing document with the rendered page in it, not our
+    /// ink-only page artifact. Switched off here, this document never schedules that timer and
+    /// never writes that file. See docs/verify/AUTOSAVE-SEPARATION.md.
+    document->setAutoSaveActive(false);
+
+    /// And the tab says which page of which notebook it is rather than "Not Saved": caption() has
+    /// nothing but the URL to name a document by, and there is no URL.
+    const QString notebook = QFileInfo(m_manifest.sourceFile).completeBaseName();
+    document->setUntitledCaption(QStringLiteral("%1 - page %2/%3")
+                                     .arg(notebook)
+                                     .arg(index + 1)
+                                     .arg(m_manifest.pages.size()));
+
+    /// Kept for the Document Information dialog; the tab no longer reads it (see caption()).
+    document->documentInfo()->setAboutInfo(QStringLiteral("title"), notebook);
     document->setCurrentImage(image, true, activeNode);
     document->setProperty("pdfioProjectDir", m_projectDir);
     document->setProperty("pdfioPageIndex", m_manifest.pages.at(index).index);

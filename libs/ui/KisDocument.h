@@ -272,6 +272,12 @@ public:
      * Allow to activate or deactivate autosave on document, independently of auto save delay
      *
      * the value is independent of auto save delay
+     *
+     * A document that is switched off here is not an autosave participant at all: the timer is
+     * never started for it (setAutoSaveDelay() checks the same flag) and neither slotAutoSaveImpl()
+     * nor autoSaveOnPause() writes anything, whoever calls them. That is what keeps a document
+     * that is not a file -- a notebook page, whose ink is written by its own page save -- out of
+     * Krita's autosave and recovery flow. Documents that never touch this read as before.
      */
     void setAutoSaveActive(bool autoSaveIsActive);
 
@@ -281,6 +287,18 @@ public:
      * the value is independent of auto save delay
      */
     bool isAutoSaveActive();
+
+    /**
+     * A name for a document that has no file behind it.
+     *
+     * caption() names a document after its URL and says "Not Saved" when there is none, which is
+     * what a tab and a window title are built from. A notebook page is not a file and must not be
+     * named as one, so it brings its own name -- the notebook and the page -- and every surface
+     * that reads caption() says that instead. A document that does not set it reads exactly as
+     * before, "Not Saved" included.
+     */
+    void setUntitledCaption(const QString &caption);
+    QString untitledCaption() const;
 
     /**
      * Set standard autosave interval that is set by a config file

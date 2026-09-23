@@ -32,6 +32,19 @@ kis_add_tests(
     LINK_LIBRARIES kritaui kritatransformmaskstubs
     )
 
+# Autosave must stay Krita's. A notebook page tells its document that it is not an autosave
+# participant; this checks that such a document neither schedules the timer nor writes a file, and
+# -- the control -- that a normal document still does both. The autosave write is Krita's .kra
+# export and the colour space registry wants the ICC engine, both of which are plugins, so the
+# test points KRITA_PLUGIN_PATH at the directory they are built into and depends on them.
+kis_add_test( KisDocumentAutoSaveTest.cpp
+    TEST_NAME KisDocumentAutoSaveTest
+    LINK_LIBRARIES kritaui kritatestsdk
+    )
+add_dependencies(KisDocumentAutoSaveTest kritakraexport kritalcmsengine)
+target_compile_definitions(KisDocumentAutoSaveTest PRIVATE
+    KISDOCUMENT_TEST_PLUGIN_DIR="$<TARGET_FILE_DIR:kritakraexport>")
+
 if (ENABLE_UPDATERS)
 if (UNIX)
     kis_add_test( KisAppimageUpdaterTest.cpp

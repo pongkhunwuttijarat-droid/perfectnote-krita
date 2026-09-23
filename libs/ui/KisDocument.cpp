@@ -374,6 +374,8 @@ public:
     bool modified = false;
     bool readwrite = false;
     bool autoSaveActive = true;
+    /// See setUntitledCaption(): the name a document with no file shows instead of "Not Saved".
+    QString untitledCaption;
 
     QDateTime firstMod;
     QDateTime lastMod;
@@ -536,6 +538,7 @@ void KisDocument::Private::copyFromImpl(const Private &rhs, KisDocument *q, KisD
     m_file = rhs.m_file;
     readwrite = rhs.readwrite;
     autoSaveActive = rhs.autoSaveActive;
+    untitledCaption = rhs.untitledCaption;
     firstMod = rhs.firstMod;
     lastMod = rhs.lastMod;
     // XXX: the display properties will be shared between different snapshots
@@ -1533,6 +1536,11 @@ void KisDocument::slotChildCompletedSavingInBackground(KisImportExportErrorCode 
 
 void KisDocument::slotAutoSaveImpl(std::unique_ptr<KisDocument> &&optionalClonedDocument)
 {
+    /// A document that opted out of autosave never writes one, whoever calls this slot. The timer
+    /// is the usual caller and is not started for such a document either (setAutoSaveDelay()
+    /// checks the same flag), but this is the half that holds if something else calls it.
+    if (!d->autoSaveActive) return;
+
     if (!d->modified || !d->modifiedAfterAutosave) return;
     const QString autoSaveFileName = generateAutoSaveFileName(localFilePath());
 
@@ -1841,6 +1849,16 @@ bool KisDocument::isAutoSaveActive()
     return d->autoSaveActive;
 }
 
+void KisDocument::setUntitledCaption(const QString &caption)
+{
+    d->untitledCaption = caption;
+}
+
+QString KisDocument::untitledCaption() const
+{
+    return d->untitledCaption;
+}
+
 KoDocumentInfo *KisDocument::documentInfo() const
 {
     return d->docInfo;
@@ -2109,6 +2127,11 @@ bool KisDocument::openFile()
 
 void KisDocument::autoSaveOnPause()
 {
+    /// The same opt-out as slotAutoSaveImpl(): a document that is not an autosave participant is
+    /// not written when the application is paused either.
+    if (!d->autoSaveActive)
+        return;
+
     if (!d->modified || !d->modifiedAfterAutosave)
         return;
 
@@ -2229,6 +2252,11 @@ QString KisDocument::caption() const
 
     // if URL is empty...it is probably an unsaved file
     if (_url.isEmpty()) {
+        // A document that brought its own name says that instead. A notebook page has no URL and
+        // is never saved by Krita's own save, so "Not Saved" is not a useful thing to call it.
+        if (!d->untitledCaption.isEmpty()) {
+            return d->untitledCaption;
+        }
         c = " [" + i18n("Not Saved") + "] ";
     } else {
         c = _url; // Fall back to document URL
